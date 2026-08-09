@@ -12,6 +12,7 @@ from app.models.tenant import Tenant
 from app.models.user import User
 from app.schemas.report import (
     BestSeller,
+    DailyPaymentSplit,
     DailyPoint,
     PaymentMethodSales,
     PeriodComparison,
@@ -34,7 +35,10 @@ _REMAINING_QTY = SaleItem.qty - SaleItem.refunded_qty
 _REMAINING_LINE_TOTAL = SaleItem.line_total * _REMAINING_QTY / SaleItem.qty
 
 
-async def _tenant_timezone(ctx: TenantContext) -> ZoneInfo:
+async def tenant_local_timezone(ctx: TenantContext) -> ZoneInfo:
+    """Public — reused outside this module (see app/services/turbo/daily_close_service.py)
+    by anything else that needs to reason about the tenant's own business day
+    instead of recomputing this lookup."""
     tz_name = await ctx.db.scalar(select(Tenant.timezone).where(Tenant.id == ctx.tenant_id))
     return ZoneInfo(tz_name or "Asia/Bangkok")
 
@@ -48,7 +52,7 @@ async def local_date_range_to_utc(ctx: TenantContext, start_date: date, end_date
     """
     if start_date > end_date:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "start_date must not be after end_date")
-    tz = await _tenant_timezone(ctx)
+    tz = await tenant_local_timezone(ctx)
     start_local = datetime.combine(start_date, datetime.min.time(), tzinfo=tz)
     end_local = datetime.combine(end_date, datetime.min.time(), tzinfo=tz) + timedelta(days=1)
     return start_local.astimezone(_UTC), end_local.astimezone(_UTC)
@@ -68,7 +72,7 @@ async def _period_bounds_utc(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "start_date and end_date are required for a custom period")
         return await local_date_range_to_utc(ctx, start_date, end_date)
 
-    tz = await _tenant_timezone(ctx)
+    tz = await tenant_local_timezone(ctx)
     today_start_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
 
     if period == "today":
@@ -132,7 +136,7 @@ async def get_summary(
 
 
 async def get_daily_series(ctx: TenantContext, days: int = 7) -> list[DailyPoint]:
-    tz = await _tenant_timezone(ctx)
+    tz = await tenant_local_timezone(ctx)
     end_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     start_local = end_local - timedelta(days=days)
     start_utc, end_utc = start_local.astimezone(_UTC), end_local.astimezone(_UTC)
@@ -165,6 +169,47 @@ async def get_daily_series(ctx: TenantContext, days: int = 7) -> list[DailyPoint
         day = (start_local + timedelta(days=i)).date()
         sale_count, revenue = by_day.get(day, (0, Decimal("0")))
         points.append(DailyPoint(date=day, sale_count=sale_count, revenue=revenue))
+    return points
+
+
+async def get_daily_series_by_payment_method(ctx: TenantContext, days: int = 30) -> list[DailyPaymentSplit]:
+    """Same local-day window and bucketing as get_daily_series, but grouped
+    by Sale.payment_method too — a QR/card sale lands in a bank record the
+    tenant didn't type in themselves, a cash sale doesn't, and that's the
+    verified-vs-self-reported split Turbo's income profile is built on (see
+    app/services/turbo/income_service.py)."""
+    tz = await tenant_local_timezone(ctx)
+    end_local = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    start_local = end_local - timedelta(days=days)
+    start_utc, end_utc = start_local.astimezone(_UTC), end_local.astimezone(_UTC)
+
+    local_day = func.date(func.timezone(tz.key, Sale.created_at))
+
+    rows = (
+        await ctx.db.execute(
+            select(
+                local_day.label("day"),
+                Sale.payment_method,
+                func.coalesce(func.sum(Sale.total - Sale.refunded_total), 0),
+            )
+            .where(
+                Sale.tenant_id == ctx.tenant_id,
+                Sale.status.in_(_REPORTABLE_STATUSES),
+                Sale.created_at >= start_utc,
+                Sale.created_at < end_utc,
+            )
+            .group_by(local_day, Sale.payment_method)
+        )
+    ).all()
+
+    by_day: dict[date, dict[str, Decimal]] = {}
+    for day, method, revenue in rows:
+        by_day.setdefault(day, {})[method.value] = revenue
+
+    points = []
+    for i in range(days):
+        day = (start_local + timedelta(days=i)).date()
+        points.append(DailyPaymentSplit(date=day, revenue_by_method=by_day.get(day, {})))
     return points
 
 

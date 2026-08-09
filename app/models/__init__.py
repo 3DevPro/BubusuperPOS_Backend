@@ -7,6 +7,23 @@ from app.models.sale import PaymentMethod, Sale, SaleItem, SaleStatus
 from app.models.stock import StockMovement, StockMovementType
 from app.models.supplier import Supplier
 from app.models.tenant import Tenant
+from app.models.turbo.branch import (
+    Branch,
+    Lead,
+    LeadSource,
+    LeadStatus,
+    MerchantProspect,
+    MerchantProspectStatus,
+)
+from app.models.turbo.daily_close import DailyClose, DailyCloseReason
+from app.models.turbo.insurance import (
+    InsuranceClaim,
+    InsuranceClaimStatus,
+    InsurancePolicy,
+    InsurancePolicyStatus,
+    InsuranceProduct,
+    InsuranceProductKind,
+)
 from app.models.user import User, UserRole
 
 __all__ = [
@@ -30,4 +47,18 @@ __all__ = [
     "PurchaseOrderItem",
     "PurchaseOrderStatus",
     "AuditLog",
+    "DailyClose",
+    "DailyCloseReason",
+    "InsuranceProduct",
+    "InsuranceProductKind",
+    "InsurancePolicy",
+    "InsurancePolicyStatus",
+    "InsuranceClaim",
+    "InsuranceClaimStatus",
+    "Branch",
+    "MerchantProspect",
+    "MerchantProspectStatus",
+    "Lead",
+    "LeadSource",
+    "LeadStatus",
 ]

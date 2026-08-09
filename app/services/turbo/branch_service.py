@@ -1,0 +1,157 @@
+from datetime import datetime, timedelta, timezone
+
+from fastapi import HTTPException, status
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.branch_scope import BranchContext
+from app.core.security import hash_secret_async
+from app.models.turbo.branch import Branch, Lead, MerchantProspect
+from app.models.user import User, UserRole
+from app.schemas.turbo.branch import (
+    BranchSignupRequest,
+    LeaderboardEntryResponse,
+    LeadRespondRequest,
+    ProspectCreateRequest,
+    ProspectVisitRequest,
+)
+
+_LEADERBOARD_WINDOW = timedelta(days=7)
+
+
+async def signup(db: AsyncSession, body: BranchSignupRequest) -> User:
+    """Joins an existing branch (matched by code) if one exists, otherwise
+    creates it — a second Champion signing up with the same branch_code is
+    the normal case (a branch has more than one Champion), not an error."""
+    branch = await db.scalar(select(Branch).where(Branch.code == body.branch_code))
+    if branch is None:
+        branch = Branch(code=body.branch_code, name=body.branch_name, province=body.province)
+        db.add(branch)
+        await db.flush()
+
+    staff = User(
+        branch_id=branch.id,
+        name=body.staff_name,
+        email=body.email,
+        password_hash=await hash_secret_async(body.password),
+        role=UserRole.branch_champion,
+    )
+    db.add(staff)
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "email already registered") from exc
+
+    return staff
+
+
+async def list_prospects(ctx: BranchContext) -> list[MerchantProspect]:
+    result = await ctx.db.scalars(ctx.scoped(MerchantProspect).order_by(MerchantProspect.created_at.desc()))
+    return list(result)
+
+
+async def create_prospect(ctx: BranchContext, body: ProspectCreateRequest) -> MerchantProspect:
+    prospect = MerchantProspect(
+        branch_id=ctx.branch_id,
+        name=body.name,
+        business_type=body.business_type,
+        address=body.address,
+        phone=body.phone,
+    )
+    ctx.db.add(prospect)
+    await ctx.db.commit()
+    await ctx.db.refresh(prospect)
+    return prospect
+
+
+async def visit_prospect(ctx: BranchContext, prospect_id, body: ProspectVisitRequest) -> MerchantProspect:
+    prospect = await ctx.db.scalar(ctx.scoped(MerchantProspect).where(MerchantProspect.id == prospect_id))
+    if prospect is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "prospect not found")
+
+    prospect.status = body.status
+    prospect.note = body.note
+    prospect.last_visited_at = datetime.now(timezone.utc)
+    await ctx.db.commit()
+    await ctx.db.refresh(prospect)
+    return prospect
+
+
+async def list_leads(ctx: BranchContext) -> list[Lead]:
+    # Not ctx.scoped(Lead) — Lead's FK column is assigned_branch_id, not
+    # branch_id (a lead is *assigned to* a branch, not intrinsically owned
+    # by it the way a MerchantProspect is), so the generic scoped() helper
+    # (which assumes a `branch_id` column) doesn't apply here.
+    result = await ctx.db.scalars(
+        select(Lead).where(Lead.assigned_branch_id == ctx.branch_id).order_by(Lead.created_at.desc())
+    )
+    return list(result)
+
+
+async def respond_lead(ctx: BranchContext, lead_id, body: LeadRespondRequest) -> Lead:
+    lead = await ctx.db.scalar(
+        select(Lead).where(Lead.id == lead_id, Lead.assigned_branch_id == ctx.branch_id)
+    )
+    if lead is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "lead not found")
+
+    # The SLA clock (see the case's 15-minute target) stops at the *first*
+    # response regardless of which status the Champion sets it to — a lead
+    # marked "lost" on first contact still counts as responded-to.
+    if lead.first_response_at is None:
+        lead.first_response_at = datetime.now(timezone.utc)
+    lead.status = body.status
+    await ctx.db.commit()
+    await ctx.db.refresh(lead)
+    return lead
+
+
+async def leaderboard(ctx: BranchContext) -> list[LeaderboardEntryResponse]:
+    """Ranks every branch, not just the caller's own — Champions are meant to
+    see how they stack up against neighboring branches (see the case's
+    Roadmap slide: "ร้านที่เยี่ยม / สาขา / สัปดาห์"), and this data isn't
+    tenant-sensitive shop data, just each branch's own activity counts."""
+    since = datetime.now(timezone.utc) - _LEADERBOARD_WINDOW
+
+    visited_subq = (
+        select(MerchantProspect.branch_id, func.count().label("visited"))
+        .where(MerchantProspect.last_visited_at >= since)
+        .group_by(MerchantProspect.branch_id)
+        .subquery()
+    )
+    contacted_subq = (
+        select(Lead.assigned_branch_id.label("branch_id"), func.count().label("contacted"))
+        .where(Lead.first_response_at >= since)
+        .group_by(Lead.assigned_branch_id)
+        .subquery()
+    )
+
+    rows = (
+        await ctx.db.execute(
+            select(
+                Branch.id,
+                Branch.name,
+                func.coalesce(visited_subq.c.visited, 0),
+                func.coalesce(contacted_subq.c.contacted, 0),
+            )
+            .outerjoin(visited_subq, visited_subq.c.branch_id == Branch.id)
+            .outerjoin(contacted_subq, contacted_subq.c.branch_id == Branch.id)
+        )
+    ).all()
+
+    entries = [
+        LeaderboardEntryResponse(
+            branch_id=row[0],
+            branch_name=row[1],
+            prospects_visited=row[2],
+            leads_contacted=row[3],
+            # Weighted so a Champion can't top the board on visits alone —
+            # actually landing a lead (contacted) counts for more.
+            score=row[2] + row[3] * 2,
+        )
+        for row in rows
+    ]
+    entries.sort(key=lambda e: e.score, reverse=True)
+    return entries

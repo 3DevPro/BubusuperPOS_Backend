@@ -23,6 +23,17 @@ class DailyPoint(BaseModel):
     revenue: Decimal
 
 
+class DailyPaymentSplit(BaseModel):
+    """Same local-day bucketing as DailyPoint, but broken out per
+    Sale.payment_method — used by Turbo's income profile (see
+    app/services/turbo/income_service.py) to tell verified (QR/card) income
+    apart from self-reported cash. Empty dict means no sales that day, same
+    "day exists but had none" meaning as DailyPoint.sale_count == 0."""
+
+    date: date
+    revenue_by_method: dict[str, Decimal]
+
+
 class BestSeller(BaseModel):
     product_id: uuid.UUID
     name: str

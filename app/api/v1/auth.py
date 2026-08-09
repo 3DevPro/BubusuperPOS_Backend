@@ -6,9 +6,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
-from app.core.deps import CurrentTenant
+from app.core.deps import get_token_payload
 from app.core.rate_limit import FailureLimiter, login_limiter, pin_login_limiter
 from app.core.security import (
+    TokenPayload,
     TokenType,
     create_access_token,
     create_refresh_token,
@@ -32,8 +33,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 def _issue_tokens(user: User) -> TokenResponse:
     return TokenResponse(
-        access_token=create_access_token(user.id, user.tenant_id, user.role.value),
-        refresh_token=create_refresh_token(user.id, user.tenant_id, user.role.value),
+        access_token=create_access_token(user.id, user.tenant_id, user.role.value, branch_id=user.branch_id),
+        refresh_token=create_refresh_token(user.id, user.tenant_id, user.role.value, branch_id=user.branch_id),
     )
 
 
@@ -140,8 +141,16 @@ async def refresh(body: RefreshRequest, db: Annotated[AsyncSession, Depends(get_
 
 
 @router.get("/me", response_model=MeResponse)
-async def me(ctx: CurrentTenant) -> MeResponse:
-    user = await ctx.db.get(User, ctx.user_id)
+async def me(
+    payload: Annotated[TokenPayload, Depends(get_token_payload)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> MeResponse:
+    # Deliberately not CurrentTenant — that rejects branch_champion tokens
+    # (no tenant_id), and "who am I" must work for any authenticated
+    # principal, shop or branch alike.
+    user = await db.get(User, payload.sub)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
-    return MeResponse(id=user.id, tenant_id=user.tenant_id, name=user.name, role=user.role.value)
+    return MeResponse(
+        id=user.id, tenant_id=user.tenant_id, branch_id=user.branch_id, name=user.name, role=user.role.value
+    )

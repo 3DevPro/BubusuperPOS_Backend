@@ -15,6 +15,7 @@ from app.api.v1 import (
     suppliers,
     tenant,
 )
+from app.api.v1.turbo import router as turbo_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(health.router)
@@ -30,3 +31,4 @@ api_router.include_router(reports.router)
 api_router.include_router(tenant.router)
 api_router.include_router(suppliers.router)
 api_router.include_router(purchase_orders.router)
+api_router.include_router(turbo_router)

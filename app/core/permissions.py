@@ -18,6 +18,10 @@ class Permission(str, enum.Enum):
     # adding a customer is a normal part of the checkout flow a cashier
     # performs, not sensitive back-office data.
     manage_customers = "manage_customers"
+    # Turbo's micro-insurance module (quote/purchase/claim) — a financial
+    # commitment on the tenant's behalf, so it's back-office like
+    # view_reports/refund_sale, not a cashier-level action.
+    manage_insurance = "manage_insurance"
 
 
 ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
@@ -31,6 +35,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.refund_sale,
         Permission.view_reports,
         Permission.manage_customers,
+        Permission.manage_insurance,
     },
     UserRole.cashier: {
         Permission.view_products,
@@ -38,6 +43,11 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.view_sales,
         Permission.manage_customers,
     },
+    # branch_champion never has tenant_id, so get_tenant_context already
+    # rejects any request that would reach a Permission check for this role
+    # (see app/core/deps.py) — this entry exists only so role_has_permission
+    # doesn't KeyError if it's ever consulted directly.
+    UserRole.branch_champion: set(),
 }
 
 

@@ -86,6 +86,12 @@ class FailureLimiter:
 
 login_limiter = FailureLimiter()
 pin_login_limiter = FailureLimiter()
+# The O2O quote endpoint (see app/api/v1/turbo/public.py) has no real
+# "failure" to count — every valid submission succeeds — so it's used as a
+# flat cap instead: every call records as if it failed, keyed by caller IP.
+# 8/hour is generous for a genuine visitor filling the form a few times,
+# tight enough that scripting a Lead-table flood costs real IP rotation.
+public_quote_limiter = FailureLimiter(max_failures=8, window_seconds=60 * 60)
 
 
 def reset_all() -> None:
@@ -93,3 +99,4 @@ def reset_all() -> None:
     one test's failed logins would count against the next one's."""
     login_limiter.reset()
     pin_login_limiter.reset()
+    public_quote_limiter.reset()

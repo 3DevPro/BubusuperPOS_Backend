@@ -46,16 +46,29 @@ class TokenType(str, Enum):
 
 class TokenPayload(BaseModel):
     sub: uuid.UUID
-    tid: uuid.UUID
+    # Exactly one of tid/bid is set — tid for an ordinary shop account, bid
+    # for a branch_champion (see UserRole.branch_champion). Both optional
+    # rather than a tagged union to keep decode_token/jose's dict round-trip
+    # simple; get_tenant_context/get_branch_context each check theirs.
+    tid: uuid.UUID | None = None
+    bid: uuid.UUID | None = None
     role: str
     type: TokenType
 
 
-def _create_token(user_id: uuid.UUID, tenant_id: uuid.UUID, role: str, token_type: TokenType, expires_delta: timedelta) -> str:
+def _create_token(
+    user_id: uuid.UUID,
+    tenant_id: uuid.UUID | None,
+    branch_id: uuid.UUID | None,
+    role: str,
+    token_type: TokenType,
+    expires_delta: timedelta,
+) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
-        "tid": str(tenant_id),
+        "tid": str(tenant_id) if tenant_id is not None else None,
+        "bid": str(branch_id) if branch_id is not None else None,
         "role": role,
         "type": token_type.value,
         "iat": now,
@@ -64,16 +77,20 @@ def _create_token(user_id: uuid.UUID, tenant_id: uuid.UUID, role: str, token_typ
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
-def create_access_token(user_id: uuid.UUID, tenant_id: uuid.UUID, role: str) -> str:
+def create_access_token(
+    user_id: uuid.UUID, tenant_id: uuid.UUID | None, role: str, branch_id: uuid.UUID | None = None
+) -> str:
     return _create_token(
-        user_id, tenant_id, role, TokenType.access,
+        user_id, tenant_id, branch_id, role, TokenType.access,
         timedelta(minutes=settings.access_token_expire_minutes),
     )
 
 
-def create_refresh_token(user_id: uuid.UUID, tenant_id: uuid.UUID, role: str) -> str:
+def create_refresh_token(
+    user_id: uuid.UUID, tenant_id: uuid.UUID | None, role: str, branch_id: uuid.UUID | None = None
+) -> str:
     return _create_token(
-        user_id, tenant_id, role, TokenType.refresh,
+        user_id, tenant_id, branch_id, role, TokenType.refresh,
         timedelta(days=settings.refresh_token_expire_days),
     )
 

@@ -32,6 +32,9 @@ class RefreshRequest(BaseModel):
 
 class MeResponse(BaseModel):
     id: uuid.UUID
-    tenant_id: uuid.UUID
+    # Exactly one of these is set — tenant_id for an ordinary shop account,
+    # branch_id for a branch_champion (see UserRole.branch_champion).
+    tenant_id: uuid.UUID | None
+    branch_id: uuid.UUID | None
     name: str
     role: str
