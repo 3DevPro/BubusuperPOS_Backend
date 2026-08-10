@@ -45,3 +45,9 @@ class PublicLoanQuoteResponse(BaseModel):
     total_interest: Decimal
     total_repayment: Decimal
     lead_id: uuid.UUID
+
+
+class LoanTermBoundsResponse(BaseModel):
+    collateral_kind: str
+    min_term_months: int
+    max_term_months: int

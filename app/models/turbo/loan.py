@@ -3,7 +3,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -91,6 +91,18 @@ class LoanAccount(TenantScopedMixin, Base):
     generating them lazily."""
 
     __tablename__ = "turbo_loan_accounts"
+    __table_args__ = (
+        # One account per application — see migration
+        # c1a9f6d2e7b3_add_turbo_loan_account_uniqueness for the rationale
+        # (backstop for the disburse() double-disbursement race).
+        UniqueConstraint("application_id", name="uq_turbo_loan_accounts_application_id"),
+        Index(
+            "uq_turbo_loan_accounts_tenant_active",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     application_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("turbo_loan_applications.id"))

@@ -1,13 +1,15 @@
+import asyncio
 import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest_asyncio
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models.turbo.branch import Branch
-from app.models.turbo.loan import LoanCollateralKind, LoanProduct
+from app.models.turbo.loan import LoanAccount, LoanCollateralKind, LoanProduct
 from app.services.turbo.loan_service import amortized_installment, build_schedule
 
 from .conftest import auth_headers, signup
@@ -385,6 +387,94 @@ async def test_pay_installment_marks_paid_and_rejects_double_payment(client):
     summary = (await client.get("/api/v1/turbo/loans/account", headers=headers)).json()
     assert summary["installments_paid"] == 1
     assert summary["on_time_payments"] == 1
+
+
+async def test_pay_installment_rejects_underpayment(client):
+    headers = await _make_tier_1_tenant(client, "Shop N", "Owner N", "loan-n@example.com")
+
+    application = (
+        await client.post(
+            "/api/v1/turbo/loans/applications",
+            json={"product_code": "motorcycle", "requested_amount": "5000", "collateral_value": "20000", "term_months": 12},
+            headers=headers,
+        )
+    ).json()
+    account = (
+        await client.post(f"/api/v1/turbo/loans/applications/{application['id']}/disburse", headers=headers)
+    ).json()
+    installments = (
+        await client.get(f"/api/v1/turbo/loans/account/{account['id']}/installments", headers=headers)
+    ).json()
+    first_installment = installments[0]
+
+    resp = await client.post(
+        f"/api/v1/turbo/loans/installments/{first_installment['id']}/payment",
+        json={"amount": "1.00"},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+
+    installments_after = (
+        await client.get(f"/api/v1/turbo/loans/account/{account['id']}/installments", headers=headers)
+    ).json()
+    assert installments_after[0]["status"] == "unpaid"
+
+
+async def test_account_closes_when_all_installments_paid(client):
+    headers = await _make_tier_1_tenant(client, "Shop O", "Owner O", "loan-o@example.com")
+
+    application = (
+        await client.post(
+            "/api/v1/turbo/loans/applications",
+            json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 6},
+            headers=headers,
+        )
+    ).json()
+    account = (
+        await client.post(f"/api/v1/turbo/loans/applications/{application['id']}/disburse", headers=headers)
+    ).json()
+    installments = (
+        await client.get(f"/api/v1/turbo/loans/account/{account['id']}/installments", headers=headers)
+    ).json()
+
+    for installment in installments:
+        resp = await client.post(
+            f"/api/v1/turbo/loans/installments/{installment['id']}/payment",
+            json={"amount": installment["amount_due"]},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+
+    summary = await client.get("/api/v1/turbo/loans/account", headers=headers)
+    assert summary.json() is None
+
+
+async def test_concurrent_disburse_only_creates_one_active_account(client, engine):
+    headers = await _make_tier_1_tenant(client, "Shop P", "Owner P", "loan-p@example.com")
+
+    async def _apply():
+        resp = await client.post(
+            "/api/v1/turbo/loans/applications",
+            json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12},
+            headers=headers,
+        )
+        assert resp.status_code == 201, resp.text
+        return resp.json()["id"]
+
+    application_ids = [await _apply(), await _apply()]
+
+    responses = await asyncio.gather(
+        *(
+            client.post(f"/api/v1/turbo/loans/applications/{app_id}/disburse", headers=headers)
+            for app_id in application_ids
+        )
+    )
+    assert sorted(r.status_code for r in responses) == [200, 400]
+
+    session_factory = async_sessionmaker(engine)
+    async with session_factory() as session:
+        count = await session.scalar(select(func.count()).select_from(LoanAccount))
+    assert count == 1
 
 
 async def test_cashier_cannot_access_loan_endpoints(client):

@@ -1,13 +1,14 @@
 import calendar
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.tenancy import TenantContext
-from app.core.turbo_config import LOAN_LATE_GRACE_DAYS, LOAN_LTV
+from app.core.turbo_config import LOAN_LTV
 from app.models.tenant import Tenant
 from app.models.turbo.branch import Lead, LeadSource
 from app.models.turbo.loan import (
@@ -27,8 +28,11 @@ from app.schemas.turbo.loan import (
     LoanQuoteResponse,
 )
 from app.services import audit_service
+from app.services.report_service import tenant_local_timezone
 from app.services.turbo import income_service
 from app.services.turbo.branch_service import pick_branch_for_province
+from app.services.turbo.credit_service import is_on_time
+from app.services.turbo.daily_close_service import today_local
 
 _CENTS = Decimal("0.01")
 
@@ -238,23 +242,21 @@ async def disburse(ctx: TenantContext, application_id: uuid.UUID) -> LoanAccount
     the approved amount server-side, so this step only turns that decision
     into an account and writes every installment up front."""
     application = await ctx.db.scalar(
-        ctx.scoped(LoanApplication).where(LoanApplication.id == application_id)
+        ctx.scoped(LoanApplication).where(LoanApplication.id == application_id).with_for_update()
     )
     if application is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "loan application not found")
     if application.status == LoanApplicationStatus.disbursed:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "สินเชื่อนี้เบิกจ่ายไปแล้ว")
 
-    existing_active = await ctx.db.scalar(
-        ctx.scoped(LoanAccount).where(LoanAccount.status == LoanAccountStatus.active)
-    )
+    existing_active = await _active_account(ctx)
     if existing_active is not None:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "มีบัญชีสินเชื่อที่ใช้งานอยู่แล้ว ไม่สามารถเบิกจ่ายสินเชื่อใหม่ซ้อนกันได้"
         )
 
     now = datetime.now(timezone.utc)
-    first_due_date = _add_months(now.date(), 1)
+    first_due_date = _add_months(await today_local(ctx), 1)
     account = LoanAccount(
         tenant_id=ctx.tenant_id,
         application_id=application.id,
@@ -290,7 +292,18 @@ async def disburse(ctx: TenantContext, application_id: uuid.UUID) -> LoanAccount
     await audit_service.record(
         ctx, "loan.disburse", f"เบิกจ่ายสินเชื่อ {account.account_number} จำนวน {account.principal} บาท"
     )
-    await ctx.db.commit()
+    try:
+        await ctx.db.commit()
+    except IntegrityError:
+        # Backstop for the DB uniqueness constraints (migration
+        # c1a9f6d2e7b3) — the .with_for_update() lock above only serializes
+        # concurrent calls for the *same* application; this catches two
+        # different applications for the same tenant racing each other.
+        await ctx.db.rollback()
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "มีบัญชีสินเชื่อที่ใช้งานอยู่แล้ว หรือสินเชื่อนี้เบิกจ่ายไปแล้ว ไม่สามารถเบิกจ่ายซ้ำได้",
+        )
     await ctx.db.refresh(account)
     return account
 
@@ -338,10 +351,10 @@ async def get_account_summary(ctx: TenantContext) -> LoanAccountSummaryResponse 
     )
     paid = [i for i in installments if i.status == LoanInstallmentStatus.paid]
     unpaid = [i for i in installments if i.status == LoanInstallmentStatus.unpaid]
-    today = datetime.now(timezone.utc).date()
+    tz = await tenant_local_timezone(ctx)
+    today = datetime.now(tz).date()
 
-    grace = timedelta(days=LOAN_LATE_GRACE_DAYS)
-    on_time_payments = sum(1 for i in paid if i.paid_at is not None and i.paid_at.date() <= i.due_date + grace)
+    on_time_payments = sum(1 for i in paid if i.paid_at is not None and is_on_time(i.paid_at, i.due_date, tz))
     has_overdue = any(i.due_date < today for i in unpaid)
     outstanding = sum((i.amount_due for i in unpaid), Decimal("0"))
 
@@ -367,7 +380,7 @@ async def list_installments(ctx: TenantContext, account_id: uuid.UUID) -> list[L
     result = await ctx.db.scalars(
         ctx.scoped(LoanInstallment).where(LoanInstallment.account_id == account_id).order_by(LoanInstallment.sequence)
     )
-    today = datetime.now(timezone.utc).date()
+    today = await today_local(ctx)
     return [to_installment_response(i, today) for i in result]
 
 
@@ -385,13 +398,35 @@ async def pay_installment(
     if installment.status == LoanInstallmentStatus.paid:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "งวดนี้ชำระไปแล้ว")
 
+    amount = _q(amount)
+    if amount < installment.amount_due:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"ยอดชำระ ({amount}) น้อยกว่ายอดที่ต้องชำระ ({installment.amount_due}) บาท "
+            "กรุณาชำระให้ครบตามจำนวนที่ระบุใน QR",
+        )
+
     installment.status = LoanInstallmentStatus.paid
     installment.paid_at = datetime.now(timezone.utc)
-    installment.paid_amount = _q(amount)
+    installment.paid_amount = amount
     installment.paid_reference = reference
     await audit_service.record(
         ctx, "loan.pay_installment", f"ชำระงวดที่ {installment.sequence} จำนวน {installment.paid_amount} บาท"
     )
+
+    remaining_unpaid = await ctx.db.scalar(
+        select(func.count())
+        .select_from(LoanInstallment)
+        .where(
+            LoanInstallment.account_id == installment.account_id,
+            LoanInstallment.status == LoanInstallmentStatus.unpaid,
+        )
+    )
+    if remaining_unpaid == 0:
+        account = await ctx.db.get(LoanAccount, installment.account_id)
+        if account is not None:
+            account.status = LoanAccountStatus.closed
+
     await ctx.db.commit()
     await ctx.db.refresh(installment)
-    return to_installment_response(installment, datetime.now(timezone.utc).date())
+    return to_installment_response(installment, await today_local(ctx))

@@ -1,10 +1,45 @@
 import uuid
+from decimal import Decimal
 
+import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models.turbo.branch import Branch
+from app.models.turbo.loan import LoanCollateralKind, LoanProduct
 
 from .conftest import auth_headers
+
+_LOAN_QUOTE_PAYLOAD = {
+    "name": "แม่ค้า L",
+    "occupation": "ขายมอเตอร์ไซค์มือสอง",
+    "age": 35,
+    "collateral_kind": "motorcycle",
+    "collateral_value": "50000",
+    "requested_amount": "20000",
+    "term_months": 12,
+}
+
+
+# Mirrors test_turbo_loan.py's _seed_loan_products — tests build schema from
+# Base.metadata (no migration-seeded row data), so the catalog needs seeding
+# here too for any test that hits /public/loan-quote or /public/loan-term-bounds.
+@pytest_asyncio.fixture(autouse=True)
+async def _seed_loan_products(client, engine):
+    session_factory = async_sessionmaker(engine)
+    async with session_factory() as session:
+        session.add(
+            LoanProduct(
+                code="motorcycle",
+                collateral_kind=LoanCollateralKind.motorcycle,
+                name="สินเชื่อรถมอเตอร์ไซค์",
+                description="ใช้มอเตอร์ไซค์เป็นหลักประกัน",
+                max_principal=Decimal("100000"),
+                monthly_interest_rate=Decimal("0.0200"),
+                min_term_months=6,
+                max_term_months=36,
+            )
+        )
+        await session.commit()
 
 
 async def _insert_branch(engine, code, province):
@@ -106,4 +141,50 @@ async def test_quote_rate_limited_after_max_calls(client, engine):
         assert resp.status_code == 201, resp.text
 
     blocked = await client.post("/api/v1/turbo/public/quote", json=payload)
+    assert blocked.status_code == 429
+
+
+async def test_loan_quote_rate_limited_after_max_calls(client, engine):
+    await _insert_branch(engine, "PUB-007", "กรุงเทพ")
+
+    for _ in range(8):
+        resp = await client.post("/api/v1/turbo/public/loan-quote", json=_LOAN_QUOTE_PAYLOAD)
+        assert resp.status_code == 201, resp.text
+
+    blocked = await client.post("/api/v1/turbo/public/loan-quote", json=_LOAN_QUOTE_PAYLOAD)
+    assert blocked.status_code == 429
+
+
+async def test_quote_and_loan_quote_rate_limits_are_independent(client, engine):
+    # Regression test for the reviewed bug: /public/quote and
+    # /public/loan-quote used to share one FailureLimiter, so exhausting one
+    # form's budget also 429'd the other.
+    await _insert_branch(engine, "PUB-008", "กรุงเทพ")
+    quote_payload = {"name": "สแปม", "occupation": "x", "age": 20, "monthly_budget": "10"}
+
+    for _ in range(8):
+        resp = await client.post("/api/v1/turbo/public/quote", json=quote_payload)
+        assert resp.status_code == 201, resp.text
+    blocked = await client.post("/api/v1/turbo/public/quote", json=quote_payload)
+    assert blocked.status_code == 429
+
+    still_ok = await client.post("/api/v1/turbo/public/loan-quote", json=_LOAN_QUOTE_PAYLOAD)
+    assert still_ok.status_code == 201, still_ok.text
+
+
+async def test_loan_term_bounds_returns_bounds_per_collateral_kind(client):
+    resp = await client.get("/api/v1/turbo/public/loan-term-bounds")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    motorcycle = next(b for b in body if b["collateral_kind"] == "motorcycle")
+    assert motorcycle["min_term_months"] == 6
+    assert motorcycle["max_term_months"] == 36
+
+
+async def test_loan_term_bounds_rate_limited_after_max_calls(client):
+    for _ in range(30):
+        resp = await client.get("/api/v1/turbo/public/loan-term-bounds")
+        assert resp.status_code == 200, resp.text
+
+    blocked = await client.get("/api/v1/turbo/public/loan-term-bounds")
     assert blocked.status_code == 429

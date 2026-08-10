@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -15,7 +15,7 @@ from app.models.turbo.loan import (
     LoanInstallmentStatus,
     LoanProduct,
 )
-from app.services.turbo.credit_service import resolve_tier
+from app.services.turbo.credit_service import is_on_time, resolve_tier
 
 from .conftest import auth_headers, signup
 
@@ -156,6 +156,22 @@ def test_resolve_tier_pure_thresholds():
     tier, _, next_days, _ = resolve_tier(streak_days=10, on_time_payments=10)
     assert tier == "none"
     assert next_days == 20
+
+
+def test_is_on_time_converts_to_tenant_local_date_before_comparing():
+    due_date = date(2026, 1, 1)
+
+    # Bangkok is UTC+7: 2026-01-04 20:00 UTC is already 2026-01-05 03:00 in
+    # Bangkok — one day beyond a 3-day grace window. The old code compared
+    # paid_at.date() (the raw UTC date, still Jan 4 — inside the window) and
+    # would have wrongly scored this payment as on time.
+    late_paid_at = datetime(2026, 1, 4, 20, 0, tzinfo=timezone.utc)
+    assert is_on_time(late_paid_at, due_date, _TZ, grace_days=3) is False
+
+    # One UTC hour earlier is still Jan 4 in Bangkok too — within the window
+    # under both the old and new logic.
+    on_time_paid_at = datetime(2026, 1, 4, 16, 0, tzinfo=timezone.utc)
+    assert is_on_time(on_time_paid_at, due_date, _TZ, grace_days=3) is True
 
 
 async def test_credit_tier_stays_tier_1_below_tier_2_threshold(client, engine):

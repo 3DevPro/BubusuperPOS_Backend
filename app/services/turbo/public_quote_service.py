@@ -9,6 +9,7 @@ from app.core.turbo_config import DAILY_INCOME_PREMIUM_RATE, LOAN_LTV
 from app.models.turbo.branch import Lead, LeadSource
 from app.models.turbo.loan import LoanProduct
 from app.schemas.turbo.public import (
+    LoanTermBoundsResponse,
     PublicLoanQuoteRequest,
     PublicLoanQuoteResponse,
     PublicQuoteRequest,
@@ -104,3 +105,19 @@ async def quote_loan_and_create_lead(db: AsyncSession, body: PublicLoanQuoteRequ
         total_repayment=total_repayment,
         lead_id=lead.id,
     )
+
+
+async def loan_term_bounds(db: AsyncSession) -> list[LoanTermBoundsResponse]:
+    """Per-collateral-kind term-slider bounds for the public loan-quote form.
+    Can't reuse the authenticated loan_service.list_products (gated on
+    Permission.manage_loans) since this form is anonymous — this is a
+    narrow, read-only projection of the same turbo_loan_products catalog."""
+    products = await db.scalars(select(LoanProduct).where(LoanProduct.is_active.is_(True)))
+    return [
+        LoanTermBoundsResponse(
+            collateral_kind=p.collateral_kind.value,
+            min_term_months=p.min_term_months,
+            max_term_months=p.max_term_months,
+        )
+        for p in products
+    ]

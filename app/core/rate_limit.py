@@ -86,12 +86,19 @@ class FailureLimiter:
 
 login_limiter = FailureLimiter()
 pin_login_limiter = FailureLimiter()
-# The O2O quote endpoint (see app/api/v1/turbo/public.py) has no real
-# "failure" to count — every valid submission succeeds — so it's used as a
+# The public quote endpoints (see app/api/v1/turbo/public.py) have no real
+# "failure" to count — every valid submission succeeds — so each is used as a
 # flat cap instead: every call records as if it failed, keyed by caller IP.
-# 8/hour is generous for a genuine visitor filling the form a few times,
-# tight enough that scripting a Lead-table flood costs real IP rotation.
+# 8/hour is generous for a genuine visitor filling a form a few times, tight
+# enough that scripting a Lead-table flood costs real IP rotation. Each quote
+# surface gets its own independent budget so hammering one form can't also
+# throttle the other.
 public_quote_limiter = FailureLimiter(max_failures=8, window_seconds=60 * 60)
+public_loan_quote_limiter = FailureLimiter(max_failures=8, window_seconds=60 * 60)
+# /public/loan-term-bounds is a read-only catalog lookup, not a Lead-creating
+# submission — lower abuse potential than the two quote endpoints, so it gets
+# a more generous budget on its own limiter rather than sharing theirs.
+public_loan_term_bounds_limiter = FailureLimiter(max_failures=30, window_seconds=60 * 60)
 
 
 def reset_all() -> None:
@@ -100,3 +107,5 @@ def reset_all() -> None:
     login_limiter.reset()
     pin_login_limiter.reset()
     public_quote_limiter.reset()
+    public_loan_quote_limiter.reset()
+    public_loan_term_bounds_limiter.reset()

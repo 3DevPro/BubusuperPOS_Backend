@@ -1,5 +1,6 @@
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from app.core.tenancy import TenantContext
 from app.core.turbo_config import (
@@ -13,6 +14,7 @@ from app.core.turbo_config import (
 )
 from app.models.turbo.loan import LoanInstallment, LoanInstallmentStatus
 from app.schemas.turbo.loan import CreditStandingResponse
+from app.services.report_service import tenant_local_timezone
 
 
 def resolve_tier(streak_days: int, on_time_payments: int) -> tuple[str, Decimal, int | None, str | None]:
@@ -36,17 +38,26 @@ def resolve_tier(streak_days: int, on_time_payments: int) -> tuple[str, Decimal,
     return "tier_3", TIER_3_CREDIT_LIMIT, None, None
 
 
+def is_on_time(paid_at: datetime, due_date: date, tz: ZoneInfo, grace_days: int = LOAN_LATE_GRACE_DAYS) -> bool:
+    """paid_at is stored as a UTC instant; due_date is the tenant's local
+    business date. Comparing paid_at's raw UTC .date() against due_date
+    silently mis-scores anything paid near local midnight (Bangkok is
+    UTC+7, so the local date can already be a day ahead of the UTC date) —
+    always convert to the tenant's own timezone before taking .date()."""
+    return paid_at.astimezone(tz).date() <= due_date + timedelta(days=grace_days)
+
+
 async def count_on_time_payments(ctx: TenantContext) -> int:
     """Paid installments across every loan account this tenant has ever had —
     not just the currently active one, so closing one loan and opening
     another doesn't reset tier progress. "On time" allows
     LOAN_LATE_GRACE_DAYS of slack after due_date, same idea as a same-day
     bank queue not counting as a default."""
+    tz = await tenant_local_timezone(ctx)
     installments = await ctx.db.scalars(
         ctx.scoped(LoanInstallment).where(LoanInstallment.status == LoanInstallmentStatus.paid)
     )
-    grace = timedelta(days=LOAN_LATE_GRACE_DAYS)
-    return sum(1 for i in installments if i.paid_at is not None and i.paid_at.date() <= i.due_date + grace)
+    return sum(1 for i in installments if i.paid_at is not None and is_on_time(i.paid_at, i.due_date, tz))
 
 
 async def get_credit_standing(ctx: TenantContext) -> CreditStandingResponse:
