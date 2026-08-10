@@ -321,6 +321,7 @@ def to_installment_response(installment: LoanInstallment, today: date) -> LoanIn
     # derived here from due_date, so it's built explicitly rather than via
     # from_attributes (which has nothing to read it from).
     is_overdue = installment.status == LoanInstallmentStatus.unpaid and installment.due_date < today
+    days_overdue = (today - installment.due_date).days if is_overdue else None
     return LoanInstallmentResponse(
         id=installment.id,
         account_id=installment.account_id,
@@ -334,6 +335,7 @@ def to_installment_response(installment: LoanInstallment, today: date) -> LoanIn
         paid_amount=installment.paid_amount,
         paid_reference=installment.paid_reference,
         is_overdue=is_overdue,
+        days_overdue=days_overdue,
     )
 
 
@@ -355,7 +357,10 @@ async def get_account_summary(ctx: TenantContext) -> LoanAccountSummaryResponse 
     today = datetime.now(tz).date()
 
     on_time_payments = sum(1 for i in paid if i.paid_at is not None and is_on_time(i.paid_at, i.due_date, tz))
-    has_overdue = any(i.due_date < today for i in unpaid)
+    overdue = [i for i in unpaid if i.due_date < today]
+    has_overdue = len(overdue) > 0
+    overdue_amount = sum((i.amount_due for i in overdue), Decimal("0"))
+    max_days_overdue = max((today - i.due_date).days for i in overdue) if overdue else None
     outstanding = sum((i.amount_due for i in unpaid), Decimal("0"))
 
     next_installment = min(unpaid, key=lambda i: i.due_date) if unpaid else None
@@ -370,6 +375,9 @@ async def get_account_summary(ctx: TenantContext) -> LoanAccountSummaryResponse 
         next_due_amount=next_installment.amount_due if next_installment else None,
         due_in_days=(next_installment.due_date - today).days if next_installment else None,
         has_overdue=has_overdue,
+        overdue_count=len(overdue),
+        overdue_amount=overdue_amount,
+        max_days_overdue=max_days_overdue,
     )
 
 

@@ -97,6 +97,7 @@ class LoanInstallmentResponse(BaseModel):
     # Derived at read time from due_date, not a stored column — see
     # app/models/turbo/loan.py LoanInstallment docstring.
     is_overdue: bool
+    days_overdue: int | None
 
     model_config = {"from_attributes": True}
 
@@ -113,6 +114,9 @@ class LoanAccountSummaryResponse(BaseModel):
     next_due_amount: Decimal | None
     due_in_days: int | None
     has_overdue: bool
+    overdue_count: int
+    overdue_amount: Decimal
+    max_days_overdue: int | None
 
 
 class LoanPaymentRequest(BaseModel):

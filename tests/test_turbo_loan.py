@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models.turbo.branch import Branch
-from app.models.turbo.loan import LoanAccount, LoanCollateralKind, LoanProduct
+from app.models.turbo.loan import LoanAccount, LoanCollateralKind, LoanInstallment, LoanProduct
 from app.services.turbo.loan_service import amortized_installment, build_schedule
 
 from .conftest import auth_headers, signup
@@ -300,12 +300,64 @@ async def test_disburse_creates_account_with_full_schedule(client):
     assert summary["installments_paid"] == 0
     assert summary["on_time_payments"] == 0
     assert summary["has_overdue"] is False
+    assert summary["overdue_count"] == 0
+    assert Decimal(summary["overdue_amount"]) == Decimal("0")
+    assert summary["max_days_overdue"] is None
 
     installments = (
         await client.get(f"/api/v1/turbo/loans/account/{account['id']}/installments", headers=headers)
     ).json()
     assert len(installments) == 12
     assert sum(Decimal(i["principal_component"]) for i in installments) == Decimal("8000.00")
+    assert all(i["days_overdue"] is None for i in installments)
+
+
+async def test_account_summary_reports_overdue_count_amount_and_max_days(client, engine):
+    headers = await _make_tier_1_tenant(client, "Shop I2", "Owner I2", "loan-i2@example.com")
+
+    application = (
+        await client.post(
+            "/api/v1/turbo/loans/applications",
+            json={
+                "product_code": "motorcycle",
+                "requested_amount": "8000",
+                "collateral_value": "20000",
+                "term_months": 12,
+            },
+            headers=headers,
+        )
+    ).json()
+    account = (
+        await client.post(f"/api/v1/turbo/loans/applications/{application['id']}/disburse", headers=headers)
+    ).json()
+
+    installments = (
+        await client.get(f"/api/v1/turbo/loans/account/{account['id']}/installments", headers=headers)
+    ).json()
+    first, second = installments[0], installments[1]
+
+    session_factory = async_sessionmaker(engine)
+    async with session_factory() as session:
+        for row, days_late in ((first, 10), (second, 3)):
+            installment = await session.get(LoanInstallment, uuid.UUID(row["id"]))
+            installment.due_date = _today() - timedelta(days=days_late)
+            session.add(installment)
+        await session.commit()
+
+    summary = (await client.get("/api/v1/turbo/loans/account", headers=headers)).json()
+    assert summary["has_overdue"] is True
+    assert summary["overdue_count"] == 2
+    assert Decimal(summary["overdue_amount"]) == Decimal(first["amount_due"]) + Decimal(second["amount_due"])
+    assert summary["max_days_overdue"] == 10
+
+    installments = (
+        await client.get(f"/api/v1/turbo/loans/account/{account['id']}/installments", headers=headers)
+    ).json()
+    by_id = {i["id"]: i for i in installments}
+    assert by_id[first["id"]]["is_overdue"] is True
+    assert by_id[first["id"]]["days_overdue"] == 10
+    assert by_id[second["id"]]["days_overdue"] == 3
+    assert by_id[installments[2]["id"]]["days_overdue"] is None
 
 
 async def test_cannot_disburse_same_application_twice(client):
