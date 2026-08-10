@@ -3,10 +3,10 @@ from datetime import date
 from decimal import Decimal
 
 from app.core.tenancy import TenantContext
-from app.core.turbo_config import CASH_CREDIT_WEIGHT, STREAK_DAYS_REQUIRED, TIER_1_CREDIT_LIMIT
+from app.core.turbo_config import CASH_CREDIT_WEIGHT
 from app.schemas.turbo.income import IncomeProfileResponse
 from app.services import report_service
-from app.services.turbo import daily_close_service
+from app.services.turbo import credit_service, daily_close_service
 
 _CASH_METHOD = "cash"
 
@@ -68,10 +68,10 @@ async def get_income_profile(ctx: TenantContext, days: int = 30) -> IncomeProfil
         if mean > 0:
             volatility = Decimal(str(round(statistics.pstdev(floats) / mean, 4)))
 
-    eligible = streak_days >= STREAK_DAYS_REQUIRED
-    credit_tier = "tier_1" if eligible else "none"
-    credit_limit = TIER_1_CREDIT_LIMIT if eligible else Decimal("0")
-    next_tier_in_days = None if eligible else max(0, STREAK_DAYS_REQUIRED - streak_days)
+    on_time_payments = await credit_service.count_on_time_payments(ctx)
+    credit_tier, credit_limit, next_tier_in_days, next_tier_requirement = credit_service.resolve_tier(
+        streak_days, on_time_payments
+    )
 
     return IncomeProfileResponse(
         window_days=days,
@@ -87,4 +87,6 @@ async def get_income_profile(ctx: TenantContext, days: int = 30) -> IncomeProfil
         credit_tier=credit_tier,
         credit_limit=credit_limit,
         next_tier_in_days=next_tier_in_days,
+        on_time_payments=on_time_payments,
+        next_tier_requirement=next_tier_requirement,
     )

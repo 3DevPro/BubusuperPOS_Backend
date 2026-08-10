@@ -67,6 +67,9 @@ class LeadResponse(BaseModel):
     age: int | None
     quoted_daily_benefit: Decimal | None
     quoted_premium: Decimal | None
+    quoted_loan_amount: Decimal | None
+    quoted_monthly_installment: Decimal | None
+    collateral_kind: str | None
     status: LeadStatus
     first_response_at: datetime | None
     created_at: datetime

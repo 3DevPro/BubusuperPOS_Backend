@@ -20,6 +20,23 @@ from app.schemas.turbo.branch import (
 _LEADERBOARD_WINDOW = timedelta(days=7)
 
 
+async def pick_branch_for_province(db: AsyncSession, province: str | None) -> Branch:
+    """Routes a lead to a branch in the given province, or any branch if
+    none is given/matched — used by both the public O2O quote form and the
+    in-app loan application flow so a prospect/tenant always lands somewhere
+    a Champion can follow up."""
+    if province:
+        branch = await db.scalar(
+            select(Branch).where(Branch.province == province).order_by(func.random()).limit(1)
+        )
+        if branch is not None:
+            return branch
+    branch = await db.scalar(select(Branch).order_by(func.random()).limit(1))
+    if branch is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "no branches available to route this lead to")
+    return branch
+
+
 async def signup(db: AsyncSession, body: BranchSignupRequest) -> User:
     """Joins an existing branch (matched by code) if one exists, otherwise
     creates it — a second Champion signing up with the same branch_code is

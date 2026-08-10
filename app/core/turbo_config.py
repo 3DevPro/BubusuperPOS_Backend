@@ -20,6 +20,36 @@ CASH_CREDIT_WEIGHT = Decimal("0.5")
 # codebase doesn't model yet (no loan/repayment tracking exists), so they're
 # intentionally not implemented here.
 TIER_1_CREDIT_LIMIT = Decimal("10000")
+# Tiers 2/3 unlock from the tenant's own repayment history on this app's own
+# loans (see app/services/turbo/credit_service.py + loan_service.py) — the
+# "grows with repayment history, not with self-reported revenue" lever the
+# case's data-integrity slide asks for. Streak alone still gates tier 1;
+# on-time installment count gates 2/3 on top of that.
+TIER_2_CREDIT_LIMIT = Decimal("30000")
+TIER_3_CREDIT_LIMIT = Decimal("50000")
+TIER_2_ON_TIME_PAYMENTS = 3
+TIER_3_ON_TIME_PAYMENTS = 6
+# An installment paid within this many days after its due date still counts
+# as "on time" toward tier progress — a same-day bank queue or a day's delay
+# shouldn't reset progress the way an actual default should.
+LOAN_LATE_GRACE_DAYS = 3
+
+# ── Secured loans (Engine 1 — the case's four collateral products) ──
+# Loan-to-value ceiling per collateral kind — approved_amount is also capped
+# by the tenant's credit tier (see loan_service.quote), so this only binds
+# when the collateral is worth less than the tier would otherwise allow.
+LOAN_LTV: dict[str, Decimal] = {
+    "motorcycle": Decimal("0.70"),
+    "car": Decimal("0.70"),
+    "tractor": Decimal("0.60"),
+    "land_title": Decimal("0.50"),
+}
+# Not a real PromptPay biller — this prototype's loan-payment QR encodes this
+# placeholder ID via the same buildPromptPayPayload() the POS checkout uses,
+# but no settlement/reconciliation against it exists (see loan_service.pay_installment).
+TURBO_BILLER_PROMPTPAY_ID = "0000000000000"
+# An installment due within this many days surfaces the "ครบกำหนดชำระ" banner.
+DUE_REMINDER_DAYS = 7
 
 # ── Micro-insurance (Engine 1) ──
 # Quoted daily benefit = 50% of avg_daily_revenue — set at half on purpose so

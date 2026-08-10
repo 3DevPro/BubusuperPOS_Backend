@@ -60,6 +60,10 @@ class LeadSource(str, enum.Enum):
     o2o_web = "o2o_web"
     visit = "visit"
     referral = "referral"
+    # A tenant applying for a secured loan from inside the POS app itself
+    # (see app/services/turbo/loan_service.apply) rather than through the
+    # public, unauthenticated O2O quote form.
+    in_app = "in_app"
 
 
 class LeadStatus(str, enum.Enum):
@@ -93,6 +97,11 @@ class Lead(Base):
     # assumptions change later, same rationale as InsurancePolicy's snapshot.
     quoted_daily_benefit: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     quoted_premium: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    # Loan-quote counterpart of the two fields above — set instead of them
+    # when source is in_app or a public loan quote, never alongside them.
+    quoted_loan_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    quoted_monthly_installment: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    collateral_kind: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[LeadStatus] = mapped_column(default=LeadStatus.new)
     first_response_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

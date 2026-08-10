@@ -24,6 +24,16 @@ from app.models.turbo.insurance import (
     InsuranceProduct,
     InsuranceProductKind,
 )
+from app.models.turbo.loan import (
+    LoanAccount,
+    LoanAccountStatus,
+    LoanApplication,
+    LoanApplicationStatus,
+    LoanCollateralKind,
+    LoanInstallment,
+    LoanInstallmentStatus,
+    LoanProduct,
+)
 from app.models.user import User, UserRole
 
 __all__ = [
@@ -61,4 +71,12 @@ __all__ = [
     "Lead",
     "LeadSource",
     "LeadStatus",
+    "LoanProduct",
+    "LoanCollateralKind",
+    "LoanApplication",
+    "LoanApplicationStatus",
+    "LoanAccount",
+    "LoanAccountStatus",
+    "LoanInstallment",
+    "LoanInstallmentStatus",
 ]

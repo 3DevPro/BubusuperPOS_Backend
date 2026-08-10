@@ -25,4 +25,14 @@ class IncomeProfileResponse(BaseModel):
     zero_days: list[date]
     credit_tier: str
     credit_limit: Decimal
+    # Only set while the *next* tier's gate is streak-days (none -> tier_1);
+    # tiers 2/3 gate on on_time_payments instead, which has no day countdown,
+    # so this is None once tier_1 is reached — see next_tier_requirement for
+    # a human-readable requirement that covers all tiers.
     next_tier_in_days: int | None
+    # Paid installments (within grace) across every loan this tenant has
+    # ever had — see app/services/turbo/credit_service.count_on_time_payments.
+    on_time_payments: int
+    # Human-readable description of what unlocks the next tier, e.g. "ผ่อน
+    # ตรงเวลาอีก 2 งวดเพื่อขึ้นวงเงิน ฿30,000" — None once at the top tier.
+    next_tier_requirement: str | None

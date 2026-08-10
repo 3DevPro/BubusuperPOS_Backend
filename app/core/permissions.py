@@ -22,6 +22,10 @@ class Permission(str, enum.Enum):
     # commitment on the tenant's behalf, so it's back-office like
     # view_reports/refund_sale, not a cashier-level action.
     manage_insurance = "manage_insurance"
+    # Turbo's secured-loan module (quote/apply/disburse/pay) — same
+    # back-office rationale as manage_insurance: a financial commitment on
+    # the tenant's behalf, not a cashier-level action.
+    manage_loans = "manage_loans"
 
 
 ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
@@ -36,6 +40,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.view_reports,
         Permission.manage_customers,
         Permission.manage_insurance,
+        Permission.manage_loans,
     },
     UserRole.cashier: {
         Permission.view_products,
