@@ -8,6 +8,7 @@ async def test_owner_can_set_and_read_promptpay_id(client):
     resp = await client.get("/api/v1/tenant/settings", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["promptpay_id"] is None
+    assert resp.json()["business_type"] is None
 
     resp = await client.patch(
         "/api/v1/tenant/settings", json={"promptpay_id": "081-234-5678"}, headers=headers
