@@ -4,7 +4,13 @@ from decimal import Decimal
 
 from pydantic import BaseModel, EmailStr, Field
 
-from app.models.turbo.branch import LeadSource, LeadStatus, MerchantProspectStatus
+from app.models.turbo.branch import (
+    LeadSource,
+    LeadStatus,
+    MerchantProspectStatus,
+    ProspectApplicationInterest,
+    ProspectContactStatus,
+)
 
 
 class BranchSignupRequest(BaseModel):
@@ -32,11 +38,17 @@ class ProspectCreateRequest(BaseModel):
     business_type: str | None = Field(default=None, max_length=100)
     address: str | None = Field(default=None, max_length=500)
     phone: str | None = Field(default=None, max_length=32)
+    application_interest: ProspectApplicationInterest = ProspectApplicationInterest.not_applied
+    contact_status: ProspectContactStatus = ProspectContactStatus.not_scheduled
 
 
 class ProspectVisitRequest(BaseModel):
     status: MerchantProspectStatus
     note: str | None = Field(default=None, max_length=500)
+
+
+class ProspectContactStatusUpdateRequest(BaseModel):
+    contact_status: ProspectContactStatus
 
 
 class ProspectResponse(BaseModel):
@@ -46,6 +58,8 @@ class ProspectResponse(BaseModel):
     address: str | None
     phone: str | None
     status: MerchantProspectStatus
+    application_interest: ProspectApplicationInterest
+    contact_status: ProspectContactStatus
     note: str | None
     last_visited_at: datetime | None
     created_at: datetime

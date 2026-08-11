@@ -16,6 +16,7 @@ from app.schemas.turbo.branch import (
     LeaderboardEntryResponse,
     LeadRespondRequest,
     LeadResponse,
+    ProspectContactStatusUpdateRequest,
     ProspectCreateRequest,
     ProspectResponse,
     ProspectVisitRequest,
@@ -47,6 +48,13 @@ async def create_prospect(body: ProspectCreateRequest, ctx: CurrentBranch) -> Me
 @router.post("/prospects/{prospect_id}/visit", response_model=ProspectResponse)
 async def visit_prospect(prospect_id: uuid.UUID, body: ProspectVisitRequest, ctx: CurrentBranch) -> MerchantProspect:
     return await branch_service.visit_prospect(ctx, prospect_id, body)
+
+
+@router.post("/prospects/{prospect_id}/contact-status", response_model=ProspectResponse)
+async def update_prospect_contact_status(
+    prospect_id: uuid.UUID, body: ProspectContactStatusUpdateRequest, ctx: CurrentBranch
+) -> MerchantProspect:
+    return await branch_service.update_prospect_contact_status(ctx, prospect_id, body)
 
 
 @router.get("/leads", response_model=list[LeadResponse])

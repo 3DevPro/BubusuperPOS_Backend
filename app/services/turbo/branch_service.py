@@ -13,6 +13,7 @@ from app.schemas.turbo.branch import (
     BranchSignupRequest,
     LeaderboardEntryResponse,
     LeadRespondRequest,
+    ProspectContactStatusUpdateRequest,
     ProspectCreateRequest,
     ProspectVisitRequest,
 )
@@ -76,6 +77,8 @@ async def create_prospect(ctx: BranchContext, body: ProspectCreateRequest) -> Me
         business_type=body.business_type,
         address=body.address,
         phone=body.phone,
+        application_interest=body.application_interest,
+        contact_status=body.contact_status,
     )
     ctx.db.add(prospect)
     await ctx.db.commit()
@@ -91,6 +94,22 @@ async def visit_prospect(ctx: BranchContext, prospect_id, body: ProspectVisitReq
     prospect.status = body.status
     prospect.note = body.note
     prospect.last_visited_at = datetime.now(timezone.utc)
+    await ctx.db.commit()
+    await ctx.db.refresh(prospect)
+    return prospect
+
+
+async def update_prospect_contact_status(
+    ctx: BranchContext, prospect_id, body: ProspectContactStatusUpdateRequest
+) -> MerchantProspect:
+    # Separate from visit_prospect on purpose — contact history (call/met/
+    # unreachable) is logged the moment a Champion taps it, with no note or
+    # visit-outcome bundled in, unlike the Morning Route visit flow above.
+    prospect = await ctx.db.scalar(ctx.scoped(MerchantProspect).where(MerchantProspect.id == prospect_id))
+    if prospect is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "prospect not found")
+
+    prospect.contact_status = body.contact_status
     await ctx.db.commit()
     await ctx.db.refresh(prospect)
     return prospect

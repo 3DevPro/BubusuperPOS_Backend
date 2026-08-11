@@ -144,6 +144,43 @@ async def test_visit_prospect_from_other_branch_is_404(client):
     assert resp.status_code == 404
 
 
+async def test_update_prospect_contact_status(client):
+    tokens = await _branch_signup(client, "BKK-015", "champion-p@example.com")
+    headers = auth_headers(tokens)
+    prospect = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านผลไม้"}, headers=headers)
+    ).json()
+    assert prospect["contact_status"] == "not_scheduled"
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/contact-status",
+        json={"contact_status": "called"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["contact_status"] == "called"
+    # Untouched by this call — contact_status is independent of the visit flow.
+    assert resp.json()["status"] == "not_visited"
+
+
+async def test_update_prospect_contact_status_from_other_branch_is_404(client):
+    tokens_a = await _branch_signup(client, "BKK-016", "champion-q@example.com")
+    tokens_b = await _branch_signup(client, "BKK-017", "champion-r@example.com")
+
+    prospect = (
+        await client.post(
+            "/api/v1/turbo/branch/prospects", json={"name": "ร้าน A"}, headers=auth_headers(tokens_a)
+        )
+    ).json()
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/contact-status",
+        json={"contact_status": "called"},
+        headers=auth_headers(tokens_b),
+    )
+    assert resp.status_code == 404
+
+
 async def _insert_lead(engine, branch_id, name="สนใจแล้ว"):
     session_factory = async_sessionmaker(engine)
     lead_id = uuid.uuid4()

@@ -35,6 +35,20 @@ class MerchantProspectStatus(str, enum.Enum):
     not_interested = "not_interested"
 
 
+class ProspectApplicationInterest(str, enum.Enum):
+    not_applied = "not_applied"
+    applied_loan = "applied_loan"
+    applied_insurance = "applied_insurance"
+    applied_both = "applied_both"
+
+
+class ProspectContactStatus(str, enum.Enum):
+    not_scheduled = "not_scheduled"
+    called = "called"
+    met = "met"
+    unreachable = "unreachable"
+
+
 class MerchantProspect(Base):
     """A shop within a branch's walking radius that isn't a POS tenant —
     who the Champion's Morning Route (see the case's "500-Meter Playbook")
@@ -51,6 +65,10 @@ class MerchantProspect(Base):
     address: Mapped[str | None] = mapped_column(String(500))
     phone: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[MerchantProspectStatus] = mapped_column(default=MerchantProspectStatus.not_visited)
+    application_interest: Mapped[ProspectApplicationInterest] = mapped_column(
+        default=ProspectApplicationInterest.not_applied
+    )
+    contact_status: Mapped[ProspectContactStatus] = mapped_column(default=ProspectContactStatus.not_scheduled)
     note: Mapped[str | None] = mapped_column(String(500))
     last_visited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
