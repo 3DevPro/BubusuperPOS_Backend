@@ -181,7 +181,37 @@ async def test_update_prospect_contact_status_from_other_branch_is_404(client):
     assert resp.status_code == 404
 
 
-async def _insert_lead(engine, branch_id, name="สนใจแล้ว"):
+async def test_delete_prospect_removes_it(client):
+    tokens = await _branch_signup(client, "BKK-018", "champion-s@example.com")
+    headers = auth_headers(tokens)
+    prospect = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านผลไม้"}, headers=headers)
+    ).json()
+
+    resp = await client.delete(f"/api/v1/turbo/branch/prospects/{prospect['id']}", headers=headers)
+    assert resp.status_code == 204, resp.text
+
+    listed = await client.get("/api/v1/turbo/branch/prospects", headers=headers)
+    assert listed.json() == []
+
+
+async def test_delete_prospect_from_other_branch_is_404(client):
+    tokens_a = await _branch_signup(client, "BKK-019", "champion-t@example.com")
+    tokens_b = await _branch_signup(client, "BKK-020", "champion-u@example.com")
+
+    prospect = (
+        await client.post(
+            "/api/v1/turbo/branch/prospects", json={"name": "ร้าน A"}, headers=auth_headers(tokens_a)
+        )
+    ).json()
+
+    resp = await client.delete(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}", headers=auth_headers(tokens_b)
+    )
+    assert resp.status_code == 404
+
+
+async def _insert_lead(engine, branch_id, name="สนใจแล้ว", prospect_id=None):
     session_factory = async_sessionmaker(engine)
     lead_id = uuid.uuid4()
     async with session_factory() as session:
@@ -189,6 +219,7 @@ async def _insert_lead(engine, branch_id, name="สนใจแล้ว"):
             Lead(
                 id=lead_id,
                 assigned_branch_id=branch_id,
+                prospect_id=prospect_id,
                 source=LeadSource.o2o_web,
                 name=name,
                 occupation="แม่ค้า",
@@ -197,6 +228,23 @@ async def _insert_lead(engine, branch_id, name="สนใจแล้ว"):
         )
         await session.commit()
     return lead_id
+
+
+async def test_delete_prospect_with_associated_lead_is_409(client, engine):
+    tokens = await _branch_signup(client, "BKK-021", "champion-v@example.com")
+    headers = auth_headers(tokens)
+    me = (await client.get("/api/v1/auth/me", headers=headers)).json()
+    prospect = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านผลไม้"}, headers=headers)
+    ).json()
+
+    await _insert_lead(engine, me["branch_id"], prospect_id=uuid.UUID(prospect["id"]))
+
+    resp = await client.delete(f"/api/v1/turbo/branch/prospects/{prospect['id']}", headers=headers)
+    assert resp.status_code == 409
+
+    listed = await client.get("/api/v1/turbo/branch/prospects", headers=headers)
+    assert len(listed.json()) == 1
 
 
 async def test_respond_to_lead_sets_first_response_once(client, engine):

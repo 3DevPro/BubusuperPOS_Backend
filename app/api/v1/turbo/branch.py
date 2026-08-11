@@ -57,6 +57,11 @@ async def update_prospect_contact_status(
     return await branch_service.update_prospect_contact_status(ctx, prospect_id, body)
 
 
+@router.delete("/prospects/{prospect_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_prospect(prospect_id: uuid.UUID, ctx: CurrentBranch) -> None:
+    await branch_service.delete_prospect(ctx, prospect_id)
+
+
 @router.get("/leads", response_model=list[LeadResponse])
 async def list_leads(ctx: CurrentBranch) -> list[Lead]:
     return await branch_service.list_leads(ctx)

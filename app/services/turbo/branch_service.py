@@ -99,6 +99,24 @@ async def visit_prospect(ctx: BranchContext, prospect_id, body: ProspectVisitReq
     return prospect
 
 
+async def delete_prospect(ctx: BranchContext, prospect_id) -> None:
+    prospect = await ctx.db.scalar(ctx.scoped(MerchantProspect).where(MerchantProspect.id == prospect_id))
+    if prospect is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "prospect not found")
+
+    await ctx.db.delete(prospect)
+    try:
+        await ctx.db.commit()
+    except IntegrityError as exc:
+        # A Lead can point back at this prospect (Lead.prospect_id) — no
+        # ON DELETE behavior is set on that FK, so deleting under it would
+        # orphan the lead's history rather than silently detaching it.
+        await ctx.db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "cannot delete a prospect that already has an associated lead"
+        ) from exc
+
+
 async def update_prospect_contact_status(
     ctx: BranchContext, prospect_id, body: ProspectContactStatusUpdateRequest
 ) -> MerchantProspect:
