@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.models.turbo.branch import Lead, LeadSource, MerchantProspect
+from app.models.turbo.branch import Lead, LeadSource, MerchantProspect, ProspectContactStatus
 
 from .conftest import auth_headers
 
@@ -304,6 +304,74 @@ async def test_leaderboard_ranks_branches_by_score(client, engine):
     assert scores == sorted(scores, reverse=True)
 
 
+async def test_leaderboard_maps_called_to_contacted_and_met_to_visited(client):
+    tokens = await _branch_signup(client, "BKK-022", "champion-w@example.com")
+    headers = auth_headers(tokens)
+
+    called = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านโทร"}, headers=headers)
+    ).json()
+    await client.post(
+        f"/api/v1/turbo/branch/prospects/{called['id']}/contact-status",
+        json={"contact_status": "called"},
+        headers=headers,
+    )
+    met = (await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านนัดพบ"}, headers=headers)).json()
+    await client.post(
+        f"/api/v1/turbo/branch/prospects/{met['id']}/contact-status",
+        json={"contact_status": "met"},
+        headers=headers,
+    )
+    # Not contacted yet, and explicitly unreachable — neither should count.
+    await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านยังไม่ติดต่อ"}, headers=headers)
+    unreachable = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านติดต่อไม่ได้"}, headers=headers)
+    ).json()
+    await client.post(
+        f"/api/v1/turbo/branch/prospects/{unreachable['id']}/contact-status",
+        json={"contact_status": "unreachable"},
+        headers=headers,
+    )
+
+    me = (await client.get("/api/v1/auth/me", headers=headers)).json()
+    resp = await client.get("/api/v1/turbo/branch/leaderboard", headers=headers)
+    row = next(r for r in resp.json() if r["branch_id"] == me["branch_id"])
+    # Called counts as "contacted"; met counts as "visited" instead, not both.
+    assert row["prospects_contacted"] == 1
+    assert row["prospects_visited"] == 1
+
+
+async def test_leaderboard_counts_are_cumulative_not_a_status_snapshot(client):
+    """Changing a prospect's contact_status must not erase counts it already
+    earned — called_at/met_at each persist independently once set (see the
+    model's comment), unlike contact_status itself which only holds the
+    latest value."""
+    tokens = await _branch_signup(client, "BKK-023", "champion-x@example.com")
+    headers = auth_headers(tokens)
+
+    prospect = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านทดสอบ"}, headers=headers)
+    ).json()
+    await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/contact-status",
+        json={"contact_status": "called"},
+        headers=headers,
+    )
+    # Now mark the same prospect met — current contact_status moves on, but
+    # the earlier call should still count.
+    await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/contact-status",
+        json={"contact_status": "met"},
+        headers=headers,
+    )
+
+    me = (await client.get("/api/v1/auth/me", headers=headers)).json()
+    resp = await client.get("/api/v1/turbo/branch/leaderboard", headers=headers)
+    row = next(r for r in resp.json() if r["branch_id"] == me["branch_id"])
+    assert row["prospects_contacted"] == 1
+    assert row["prospects_visited"] == 1
+
+
 async def test_leaderboard_ignores_activity_outside_the_7_day_window(client, engine):
     tokens = await _branch_signup(client, "BKK-014", "champion-o@example.com")
     me = (await client.get("/api/v1/auth/me", headers=auth_headers(tokens))).json()
@@ -315,6 +383,9 @@ async def test_leaderboard_ignores_activity_outside_the_7_day_window(client, eng
                 branch_id=me["branch_id"],
                 name="ร้านเก่า",
                 last_visited_at=datetime.now(timezone.utc) - timedelta(days=30),
+                contact_status=ProspectContactStatus.met,
+                contact_status_updated_at=datetime.now(timezone.utc) - timedelta(days=30),
+                met_at=datetime.now(timezone.utc) - timedelta(days=30),
             )
         )
         await session.commit()
@@ -322,3 +393,4 @@ async def test_leaderboard_ignores_activity_outside_the_7_day_window(client, eng
     resp = await client.get("/api/v1/turbo/branch/leaderboard", headers=auth_headers(tokens))
     row = next(r for r in resp.json() if r["branch_id"] == me["branch_id"])
     assert row["prospects_visited"] == 0
+    assert row["prospects_contacted"] == 0

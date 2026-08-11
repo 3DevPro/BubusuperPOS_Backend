@@ -95,5 +95,6 @@ class LeaderboardEntryResponse(BaseModel):
     branch_id: uuid.UUID
     branch_name: str
     prospects_visited: int
+    prospects_contacted: int
     leads_contacted: int
     score: int

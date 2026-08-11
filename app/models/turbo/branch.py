@@ -69,6 +69,17 @@ class MerchantProspect(Base):
         default=ProspectApplicationInterest.not_applied
     )
     contact_status: Mapped[ProspectContactStatus] = mapped_column(default=ProspectContactStatus.not_scheduled)
+    # Timestamp of the last time contact_status changed at all — display-only,
+    # doesn't drive the leaderboard (see called_at/met_at below for that).
+    contact_status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # called_at/met_at track each event independently of contact_status's
+    # current value and of each other, so the leaderboard's "contacted" and
+    # "visited" counts (see branch_service.leaderboard) are a cumulative
+    # history, not a snapshot — calling then later meeting a prospect keeps
+    # both counted, instead of the later status silently erasing the earlier
+    # one the way overwriting a single contact_status would.
+    called_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    met_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     note: Mapped[str | None] = mapped_column(String(500))
     last_visited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

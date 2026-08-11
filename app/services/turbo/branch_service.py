@@ -1,13 +1,13 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.branch_scope import BranchContext
 from app.core.security import hash_secret_async
-from app.models.turbo.branch import Branch, Lead, MerchantProspect
+from app.models.turbo.branch import Branch, Lead, MerchantProspect, ProspectContactStatus
 from app.models.user import User, UserRole
 from app.schemas.turbo.branch import (
     BranchSignupRequest,
@@ -71,6 +71,7 @@ async def list_prospects(ctx: BranchContext) -> list[MerchantProspect]:
 
 
 async def create_prospect(ctx: BranchContext, body: ProspectCreateRequest) -> MerchantProspect:
+    now = datetime.now(timezone.utc)
     prospect = MerchantProspect(
         branch_id=ctx.branch_id,
         name=body.name,
@@ -79,6 +80,9 @@ async def create_prospect(ctx: BranchContext, body: ProspectCreateRequest) -> Me
         phone=body.phone,
         application_interest=body.application_interest,
         contact_status=body.contact_status,
+        contact_status_updated_at=now,
+        called_at=now if body.contact_status == ProspectContactStatus.called else None,
+        met_at=now if body.contact_status == ProspectContactStatus.met else None,
     )
     ctx.db.add(prospect)
     await ctx.db.commit()
@@ -127,7 +131,15 @@ async def update_prospect_contact_status(
     if prospect is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "prospect not found")
 
+    now = datetime.now(timezone.utc)
     prospect.contact_status = body.contact_status
+    prospect.contact_status_updated_at = now
+    # called_at/met_at only ever move forward, never get cleared by a later
+    # status change — see the model's comment for why (leaderboard history).
+    if body.contact_status == ProspectContactStatus.called:
+        prospect.called_at = now
+    elif body.contact_status == ProspectContactStatus.met:
+        prospect.met_at = now
     await ctx.db.commit()
     await ctx.db.refresh(prospect)
     return prospect
@@ -169,9 +181,25 @@ async def leaderboard(ctx: BranchContext) -> list[LeaderboardEntryResponse]:
     tenant-sensitive shop data, just each branch's own activity counts."""
     since = datetime.now(timezone.utc) - _LEADERBOARD_WINDOW
 
+    # A prospect counts as "visited" either through the Morning Route visit
+    # flow (last_visited_at) or by having been marked met (met_at) — the two
+    # are different entry points to the same real-world event, an in-person
+    # visit, so either one alone should count, not both at once. Both use
+    # dedicated timestamps rather than current contact_status, so a prospect
+    # later marked "called" again still counts as visited from having been
+    # met earlier in the window — see the model's comment on called_at/met_at.
     visited_subq = (
         select(MerchantProspect.branch_id, func.count().label("visited"))
-        .where(MerchantProspect.last_visited_at >= since)
+        .where(or_(MerchantProspect.last_visited_at >= since, MerchantProspect.met_at >= since))
+        .group_by(MerchantProspect.branch_id)
+        .subquery()
+    )
+    # Likewise cumulative — a prospect counts as "contacted" if it was ever
+    # called within the window, even if its current status has since moved
+    # on to met/unreachable.
+    prospects_contacted_subq = (
+        select(MerchantProspect.branch_id, func.count().label("contacted"))
+        .where(MerchantProspect.called_at >= since)
         .group_by(MerchantProspect.branch_id)
         .subquery()
     )
@@ -188,9 +216,11 @@ async def leaderboard(ctx: BranchContext) -> list[LeaderboardEntryResponse]:
                 Branch.id,
                 Branch.name,
                 func.coalesce(visited_subq.c.visited, 0),
+                func.coalesce(prospects_contacted_subq.c.contacted, 0),
                 func.coalesce(contacted_subq.c.contacted, 0),
             )
             .outerjoin(visited_subq, visited_subq.c.branch_id == Branch.id)
+            .outerjoin(prospects_contacted_subq, prospects_contacted_subq.c.branch_id == Branch.id)
             .outerjoin(contacted_subq, contacted_subq.c.branch_id == Branch.id)
         )
     ).all()
@@ -200,10 +230,11 @@ async def leaderboard(ctx: BranchContext) -> list[LeaderboardEntryResponse]:
             branch_id=row[0],
             branch_name=row[1],
             prospects_visited=row[2],
-            leads_contacted=row[3],
+            prospects_contacted=row[3],
+            leads_contacted=row[4],
             # Weighted so a Champion can't top the board on visits alone —
             # actually landing a lead (contacted) counts for more.
-            score=row[2] + row[3] * 2,
+            score=row[2] + row[4] * 2,
         )
         for row in rows
     ]
