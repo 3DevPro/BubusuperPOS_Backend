@@ -16,6 +16,8 @@ class BranchSignupRequest(BaseModel):
     staff_name: str = Field(min_length=1, max_length=255)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+    lat: Decimal | None = Field(default=None)
+    lng: Decimal | None = Field(default=None)
 
 
 class BranchResponse(BaseModel):
@@ -25,6 +27,18 @@ class BranchResponse(BaseModel):
     province: str
 
     model_config = {"from_attributes": True}
+
+
+class NearbyBranchResponse(BaseModel):
+    id: uuid.UUID
+    code: str
+    name: str
+    province: str
+    lat: Decimal
+    lng: Decimal
+    # Derived at request time from the caller's lat/lng, not a stored
+    # column — see branch_service.list_nearby.
+    distance_km: float
 
 
 class ProspectCreateRequest(BaseModel):
