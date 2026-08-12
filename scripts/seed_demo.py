@@ -10,7 +10,12 @@ it the same way a shop that onboarded weeks ago would already have one.
 A ฿10,000 motorcycle LoanAccount is also seeded with its first 4 installments
 already paid on time and the 5th due in 5 days — so opening the app shows
 tier_2 already unlocked (see app/core/turbo_config.TIER_2_ON_TIME_PAYMENTS)
-and the "ครบกำหนดชำระ" reminder banner without any manual steps.
+and the "ครบกำหนดชำระ" reminder banner without any manual steps. Its
+LoanApplication is created straight into status=disbursed, skipping the
+doc_review/collateral_check/under_review review pipeline entirely — that
+pipeline is what scripts/seed_branch_demo.py seeds instead (2 applications
+parked mid-review on BKK-CENTRAL), since it's the Branch Champion's own
+demo data, not the shop owner's.
 
 Safe to re-run: if the tenant already has sales, only the insurance policy
 step is (re-)checked; nothing is duplicated.

@@ -63,3 +63,19 @@ DAILY_INCOME_PREMIUM_RATE = Decimal("0.0035")
 # Reasons a DailyClose is treated as insurance-eligible lost income — a
 # "holiday" or "other" close is a real record but not a claimable event.
 CLAIMABLE_CLOSE_REASONS = ("sick", "accident")
+
+# ── Loan review pipeline (Engine 1) ──
+LOAN_REVIEW_STAGES = ("submitted", "doc_review", "collateral_check", "under_review")
+# Seconds each stage sits before the clock (loan_service._auto_advance) moves
+# it on by itself — tuned to run the whole pipeline in ~2 minutes so a demo
+# finishes within a pitch slot without anyone touching a branch device.
+LOAN_STAGE_AUTO_ADVANCE_SECONDS = {
+    "submitted": 20,
+    "doc_review": 30,
+    "collateral_check": 30,
+    "under_review": 40,
+}
+LOAN_AUTO_ADVANCE_ENABLED = True  # master switch for the clock
+LOAN_AUTO_APPROVE_ENABLED = True  # under_review -> approved with nobody deciding — demo only
+LOAN_DEMO_FAST_FORWARD_ENABLED = True  # exposes the fast-forward endpoint
+LOAN_REJECT_COOLDOWN_DAYS = 7  # days a tenant must wait after a rejection before reapplying

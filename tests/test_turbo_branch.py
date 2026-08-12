@@ -1,11 +1,52 @@
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models.turbo.branch import Lead, LeadSource, MerchantProspect, ProspectContactStatus
+from app.models.turbo.loan import LoanApplication, LoanApplicationStatus, LoanCollateralKind, LoanProduct
 
 from .conftest import auth_headers, signup
+
+
+async def _seed_loan_application(engine, tenant_id, branch_id, status=LoanApplicationStatus.submitted):
+    """Inserted directly rather than walked through quote()/apply() — these
+    tests are about branch-scope isolation on the review endpoints, not
+    eligibility/quoting mechanics (already covered in test_turbo_loan.py),
+    and going through the real flow here would also need a 30-day sales
+    streak fixture this file doesn't otherwise need."""
+    session_factory = async_sessionmaker(engine)
+    async with session_factory() as session:
+        product = LoanProduct(
+            code=f"motorcycle-{uuid.uuid4().hex[:8]}",
+            collateral_kind=LoanCollateralKind.motorcycle,
+            name="สินเชื่อรถมอเตอร์ไซค์",
+            description="ทดสอบ",
+            max_principal=Decimal("100000"),
+            monthly_interest_rate=Decimal("0.02"),
+        )
+        session.add(product)
+        await session.flush()
+        application = LoanApplication(
+            tenant_id=uuid.UUID(tenant_id),
+            product_id=product.id,
+            requested_amount=Decimal("5000"),
+            collateral_value=Decimal("20000"),
+            term_months=12,
+            approved_amount=Decimal("5000"),
+            monthly_installment=Decimal("450"),
+            monthly_interest_rate_snapshot=Decimal("0.02"),
+            income_profile_snapshot={},
+            credit_tier_snapshot="tier_1",
+            assigned_branch_id=uuid.UUID(branch_id),
+            status=status,
+        )
+        session.add(application)
+        await session.flush()
+        application_id = str(application.id)
+        await session.commit()
+    return application_id
 
 
 async def _branch_signup(
@@ -505,3 +546,151 @@ async def test_branch_without_coordinates_is_excluded_from_nearby(client):
     )
     assert resp.status_code == 200, resp.text
     assert "BKK-NOCOORDS" not in [b["code"] for b in resp.json()]
+
+
+async def test_champion_sees_only_own_branch_loan_applications(client, engine):
+    tokens_a = await _branch_signup(client, "LOAN-BR-01", "champion-loan-a@example.com")
+    tokens_b = await _branch_signup(client, "LOAN-BR-02", "champion-loan-b@example.com")
+    me_a = (await client.get("/api/v1/auth/me", headers=auth_headers(tokens_a))).json()
+
+    shop = await signup(client, "Shop Loan A", "Owner Loan A", "shop-loan-a@example.com")
+    shop_me = (await client.get("/api/v1/auth/me", headers=auth_headers(shop))).json()
+    await _seed_loan_application(engine, shop_me["tenant_id"], me_a["branch_id"])
+
+    listed_a = await client.get("/api/v1/turbo/branch/loan-applications", headers=auth_headers(tokens_a))
+    assert len(listed_a.json()) == 1
+
+    listed_b = await client.get("/api/v1/turbo/branch/loan-applications", headers=auth_headers(tokens_b))
+    assert listed_b.json() == []
+
+
+async def test_champion_cannot_advance_another_branchs_application(client, engine):
+    tokens_a = await _branch_signup(client, "LOAN-BR-03", "champion-loan-c@example.com")
+    tokens_b = await _branch_signup(client, "LOAN-BR-04", "champion-loan-d@example.com")
+    me_a = (await client.get("/api/v1/auth/me", headers=auth_headers(tokens_a))).json()
+
+    shop = await signup(client, "Shop Loan B", "Owner Loan B", "shop-loan-b@example.com")
+    shop_me = (await client.get("/api/v1/auth/me", headers=auth_headers(shop))).json()
+    application_id = await _seed_loan_application(engine, shop_me["tenant_id"], me_a["branch_id"])
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/loan-applications/{application_id}/advance",
+        json={"to_status": "doc_review"},
+        headers=auth_headers(tokens_b),
+    )
+    assert resp.status_code == 404
+
+
+async def test_champion_cannot_skip_a_stage(client, engine):
+    tokens = await _branch_signup(client, "LOAN-BR-05", "champion-loan-e@example.com")
+    me = (await client.get("/api/v1/auth/me", headers=auth_headers(tokens))).json()
+    shop = await signup(client, "Shop Loan C", "Owner Loan C", "shop-loan-c@example.com")
+    shop_me = (await client.get("/api/v1/auth/me", headers=auth_headers(shop))).json()
+    application_id = await _seed_loan_application(engine, shop_me["tenant_id"], me["branch_id"])
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/loan-applications/{application_id}/advance",
+        json={"to_status": "under_review"},
+        headers=auth_headers(tokens),
+    )
+    assert resp.status_code == 400
+
+
+async def test_reject_requires_a_reason(client, engine):
+    tokens = await _branch_signup(client, "LOAN-BR-06", "champion-loan-f@example.com")
+    me = (await client.get("/api/v1/auth/me", headers=auth_headers(tokens))).json()
+    shop = await signup(client, "Shop Loan D", "Owner Loan D", "shop-loan-d@example.com")
+    shop_me = (await client.get("/api/v1/auth/me", headers=auth_headers(shop))).json()
+    application_id = await _seed_loan_application(engine, shop_me["tenant_id"], me["branch_id"])
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/loan-applications/{application_id}/reject",
+        json={"reason": "abc"},
+        headers=auth_headers(tokens),
+    )
+    assert resp.status_code == 422
+
+
+async def test_reject_records_the_reason_and_blocks_further_transitions(client, engine):
+    tokens = await _branch_signup(client, "LOAN-BR-07", "champion-loan-g@example.com")
+    me = (await client.get("/api/v1/auth/me", headers=auth_headers(tokens))).json()
+    shop = await signup(client, "Shop Loan E", "Owner Loan E", "shop-loan-e@example.com")
+    shop_me = (await client.get("/api/v1/auth/me", headers=auth_headers(shop))).json()
+    application_id = await _seed_loan_application(engine, shop_me["tenant_id"], me["branch_id"])
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/loan-applications/{application_id}/reject",
+        json={"reason": "เอกสารไม่ครบถ้วนตามที่กำหนด"},
+        headers=auth_headers(tokens),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "rejected"
+
+    detail = await client.get(
+        f"/api/v1/turbo/branch/loan-applications/{application_id}", headers=auth_headers(tokens)
+    )
+    assert detail.json()["events"][-1]["note"] == "เอกสารไม่ครบถ้วนตามที่กำหนด"
+
+    again = await client.post(
+        f"/api/v1/turbo/branch/loan-applications/{application_id}/advance",
+        json={"to_status": "doc_review"},
+        headers=auth_headers(tokens),
+    )
+    assert again.status_code == 400
+
+
+async def test_shop_owner_cannot_call_branch_loan_review_endpoints(client):
+    shop = await signup(client, "Shop Loan F", "Owner Loan F", "shop-loan-f@example.com")
+    resp = await client.get("/api/v1/turbo/branch/loan-applications", headers=auth_headers(shop))
+    assert resp.status_code == 403
+
+
+async def test_champion_cannot_disburse(client):
+    tokens = await _branch_signup(client, "LOAN-BR-08", "champion-loan-h@example.com")
+    resp = await client.post(
+        f"/api/v1/turbo/loans/applications/{uuid.uuid4()}/disburse", headers=auth_headers(tokens)
+    )
+    assert resp.status_code == 403
+
+
+async def test_advance_writes_an_event_with_the_champion_as_actor(client, engine):
+    tokens = await _branch_signup(client, "LOAN-BR-09", "champion-loan-i@example.com", staff_name="Champion Nine")
+    me = (await client.get("/api/v1/auth/me", headers=auth_headers(tokens))).json()
+    shop = await signup(client, "Shop Loan G", "Owner Loan G", "shop-loan-g@example.com")
+    shop_me = (await client.get("/api/v1/auth/me", headers=auth_headers(shop))).json()
+    application_id = await _seed_loan_application(engine, shop_me["tenant_id"], me["branch_id"])
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/loan-applications/{application_id}/advance",
+        json={"to_status": "doc_review", "note": "เอกสารครบ"},
+        headers=auth_headers(tokens),
+    )
+    assert resp.status_code == 200, resp.text
+    last_event = resp.json()["events"][-1]
+    assert last_event["actor_kind"] == "champion"
+    assert last_event["to_status"] == "doc_review"
+    assert last_event["note"] == "เอกสารครบ"
+
+
+async def test_champion_action_appears_in_the_shop_owners_audit_log(client, engine):
+    """The strongest evidence record_external actually works: a Champion
+    (BranchContext, no tenant_id of their own) advances a tenant's
+    application, and the tenant owner sees it in their own audit log."""
+    tokens = await _branch_signup(client, "LOAN-BR-10", "champion-loan-j@example.com")
+    me = (await client.get("/api/v1/auth/me", headers=auth_headers(tokens))).json()
+    shop = await signup(client, "Shop Loan H", "Owner Loan H", "shop-loan-h@example.com")
+    owner_headers = auth_headers(shop)
+    shop_me = (await client.get("/api/v1/auth/me", headers=owner_headers)).json()
+    application_id = await _seed_loan_application(engine, shop_me["tenant_id"], me["branch_id"])
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/loan-applications/{application_id}/advance",
+        json={"to_status": "doc_review"},
+        headers=auth_headers(tokens),
+    )
+    assert resp.status_code == 200, resp.text
+
+    audit = await client.get("/api/v1/audit-log", headers=owner_headers)
+    assert audit.status_code == 200, audit.text
+    actions = [row["action"] for row in audit.json()]
+    assert "loan.review_advance" in actions

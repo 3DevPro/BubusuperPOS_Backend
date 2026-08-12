@@ -11,7 +11,9 @@ from app.schemas.turbo.loan import (
     LoanAccountResponse,
     LoanAccountSummaryResponse,
     LoanApplicationCreateRequest,
+    LoanApplicationDetailResponse,
     LoanApplicationResponse,
+    LoanEligibilityResponse,
     LoanInstallmentResponse,
     LoanPaymentRequest,
     LoanProductResponse,
@@ -51,7 +53,12 @@ async def apply(
     ctx: TenantContext = Depends(require(Permission.manage_loans)),
 ) -> LoanApplication:
     return await loan_service.apply(
-        ctx, body.product_code, body.requested_amount, body.collateral_value, body.term_months
+        ctx,
+        body.product_code,
+        body.requested_amount,
+        body.collateral_value,
+        body.term_months,
+        body.collateral_detail,
     )
 
 
@@ -60,6 +67,29 @@ async def list_applications(
     ctx: TenantContext = Depends(require(Permission.manage_loans)),
 ) -> list[LoanApplication]:
     return await loan_service.list_applications(ctx)
+
+
+@router.get("/loans/applications/{application_id}", response_model=LoanApplicationDetailResponse)
+async def get_application(
+    application_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(Permission.manage_loans)),
+) -> LoanApplicationDetailResponse:
+    return await loan_service.get_application(ctx, application_id)
+
+
+@router.get("/loans/eligibility", response_model=LoanEligibilityResponse)
+async def eligibility(
+    ctx: TenantContext = Depends(require(Permission.manage_loans)),
+) -> LoanEligibilityResponse:
+    return await loan_service.check_eligibility(ctx)
+
+
+@router.post("/loans/applications/{application_id}/demo/fast-forward", response_model=LoanApplicationDetailResponse)
+async def fast_forward(
+    application_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(Permission.manage_loans)),
+) -> LoanApplicationDetailResponse:
+    return await loan_service.fast_forward_application(ctx, application_id)
 
 
 @router.post("/loans/applications/{application_id}/disburse", response_model=LoanAccountResponse)

@@ -25,6 +25,7 @@ from sqlalchemy import select  # noqa: E402
 
 from app.core.db import async_session_factory  # noqa: E402
 from app.core.security import hash_secret_async  # noqa: E402
+from app.models.tenant import Tenant  # noqa: E402
 from app.models.turbo.branch import (  # noqa: E402
     Branch,
     Lead,
@@ -33,7 +34,9 @@ from app.models.turbo.branch import (  # noqa: E402
     MerchantProspect,
     MerchantProspectStatus,
 )
+from app.models.turbo.loan import LoanApplication, LoanApplicationStatus, LoanProduct  # noqa: E402
 from app.models.user import User, UserRole  # noqa: E402
+from app.services.turbo.loan_service import amortized_installment  # noqa: E402
 
 _now = lambda: datetime.now(timezone.utc)  # noqa: E731
 
@@ -62,6 +65,45 @@ _PROSPECTS = [
     {"name": "ร้านขายลอตเตอรี่ป้าน้อย", "business_type": "retail", "phone": "0844444444", "status": MerchantProspectStatus.not_interested},
     {"name": "ร้านก๋วยเตี๋ยวเจ๊แอน", "business_type": "food", "phone": "0855555555", "status": MerchantProspectStatus.not_visited},
     {"name": "ร้านเสื้อผ้ามือสอง", "business_type": "retail", "phone": "0866666666", "status": MerchantProspectStatus.visited},
+]
+
+# Two applications parked mid-pipeline so the new "คำขอสินเชื่อ" branch tab
+# has something to review the moment the demo opens, instead of the Champion
+# staring at an empty list until the auto-advance clock produces one. Each
+# gets its own throwaway tenant+owner (not a full merchant demo account —
+# just enough to satisfy LoanApplication.tenant_id and the tenant_name/
+# tenant_phone join in loan_review_service._to_review_item).
+_LOAN_APPLICANTS = [
+    {
+        "tenant_name": "ร้านซ่อมมอเตอร์ไซค์ช่างหนุ่ม",
+        "owner_name": "ช่างหนุ่ม",
+        "phone": "0877771111",
+        "product_code": "motorcycle",
+        "requested_amount": Decimal("15000.00"),
+        "collateral_value": Decimal("30000.00"),
+        "term_months": 12,
+        "status": LoanApplicationStatus.doc_review,
+        "collateral_detail": {
+            "registration_no": "กท-1234",
+            "brand_model": "Honda Wave 110i",
+            "year": "2564",
+        },
+    },
+    {
+        "tenant_name": "ร้านวัสดุก่อสร้างพี่ต่าย",
+        "owner_name": "พี่ต่าย",
+        "phone": "0877772222",
+        "product_code": "car",
+        "requested_amount": Decimal("80000.00"),
+        "collateral_value": Decimal("180000.00"),
+        "term_months": 24,
+        "status": LoanApplicationStatus.under_review,
+        "collateral_detail": {
+            "registration_no": "1กก-5678",
+            "brand_model": "Toyota Hilux Vigo",
+            "year": "2559",
+        },
+    },
 ]
 
 # minutes_ago=None means "just created" (fresh SLA countdown just started).
@@ -147,6 +189,60 @@ async def _seed_leads(db, branch: Branch) -> None:
         )
 
 
+async def _seed_loan_applications(db, branch: Branch) -> None:
+    existing = await db.scalar(select(LoanApplication).where(LoanApplication.assigned_branch_id == branch.id))
+    if existing is not None:
+        print(f"  (ข้าม) {branch.name} มีคำขอสินเชื่อรอตรวจอยู่แล้ว")
+        return
+
+    for spec in _LOAN_APPLICANTS:
+        product = await db.scalar(select(LoanProduct).where(LoanProduct.code == spec["product_code"]))
+        if product is None:
+            print(f"  (ข้าม) ไม่พบสินค้าสินเชื่อ {spec['product_code']} ในแคตตาล็อก — ต้องรัน migration ให้ครบก่อน")
+            continue
+
+        tenant = Tenant(name=spec["tenant_name"])
+        db.add(tenant)
+        await db.flush()
+        db.add(
+            User(
+                tenant_id=tenant.id,
+                name=spec["owner_name"],
+                email=f"loan-demo-{tenant.id}@test.com",
+                phone=spec["phone"],
+                password_hash=await hash_secret_async(_STAFF_PASSWORD),
+                role=UserRole.owner,
+            )
+        )
+
+        db.add(
+            LoanApplication(
+                tenant_id=tenant.id,
+                product_id=product.id,
+                requested_amount=spec["requested_amount"],
+                collateral_value=spec["collateral_value"],
+                term_months=spec["term_months"],
+                approved_amount=spec["requested_amount"],
+                monthly_installment=amortized_installment(
+                    spec["requested_amount"], product.monthly_interest_rate, spec["term_months"]
+                ),
+                monthly_interest_rate_snapshot=product.monthly_interest_rate,
+                income_profile_snapshot={},
+                credit_tier_snapshot="tier_1",
+                cap_reasons=[],
+                assigned_branch_id=branch.id,
+                status=spec["status"],
+                collateral_detail=spec["collateral_detail"],
+                # Just started the stage — LOAN_STAGE_AUTO_ADVANCE_SECONDS is
+                # only 20-40s (see turbo_config.py), and list_review_queue()
+                # runs the same _auto_advance clock as the tenant's own poll,
+                # so anything older than that would already have moved past
+                # the stage this demo wants the Champion to see first.
+                stage_started_at=_now(),
+            )
+        )
+
+
 async def _seed_rival_branch_activity(db, branch: Branch) -> None:
     """A little activity on a second branch so the leaderboard tab has an
     actual ranking to show, not just one row."""
@@ -187,6 +283,7 @@ async def main() -> None:
         staff = await _get_or_create_staff(db, main_branch)
         await _seed_prospects(db, main_branch)
         await _seed_leads(db, main_branch)
+        await _seed_loan_applications(db, main_branch)
         await _seed_rival_branch_activity(db, rival_branch)
         await db.commit()
 

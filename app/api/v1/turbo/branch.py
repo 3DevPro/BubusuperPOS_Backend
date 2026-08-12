@@ -24,7 +24,13 @@ from app.schemas.turbo.branch import (
     ProspectResponse,
     ProspectVisitRequest,
 )
-from app.services.turbo import branch_service
+from app.schemas.turbo.loan import (
+    LoanReviewAdvanceRequest,
+    LoanReviewDetailResponse,
+    LoanReviewItemResponse,
+    LoanRejectRequest,
+)
+from app.services.turbo import branch_service, loan_review_service
 
 router = APIRouter(prefix="/branch", tags=["turbo-branch"])
 
@@ -90,3 +96,29 @@ async def respond_lead(lead_id: uuid.UUID, body: LeadRespondRequest, ctx: Curren
 @router.get("/leaderboard", response_model=list[LeaderboardEntryResponse])
 async def leaderboard(ctx: CurrentBranch) -> list[LeaderboardEntryResponse]:
     return await branch_service.leaderboard(ctx)
+
+
+@router.get("/loan-applications", response_model=list[LoanReviewItemResponse])
+async def list_loan_applications(
+    ctx: CurrentBranch, include_decided: bool = False
+) -> list[LoanReviewItemResponse]:
+    return await loan_review_service.list_review_queue(ctx, include_decided)
+
+
+@router.get("/loan-applications/{application_id}", response_model=LoanReviewDetailResponse)
+async def get_loan_application(application_id: uuid.UUID, ctx: CurrentBranch) -> LoanReviewDetailResponse:
+    return await loan_review_service.get_review_detail(ctx, application_id)
+
+
+@router.post("/loan-applications/{application_id}/advance", response_model=LoanReviewDetailResponse)
+async def advance_loan_application(
+    application_id: uuid.UUID, body: LoanReviewAdvanceRequest, ctx: CurrentBranch
+) -> LoanReviewDetailResponse:
+    return await loan_review_service.advance(ctx, application_id, body.to_status, body.note)
+
+
+@router.post("/loan-applications/{application_id}/reject", response_model=LoanReviewDetailResponse)
+async def reject_loan_application(
+    application_id: uuid.UUID, body: LoanRejectRequest, ctx: CurrentBranch
+) -> LoanReviewDetailResponse:
+    return await loan_review_service.reject(ctx, application_id, body.reason)

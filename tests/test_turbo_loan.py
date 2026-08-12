@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -9,7 +9,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models.turbo.branch import Branch
-from app.models.turbo.loan import LoanAccount, LoanCollateralKind, LoanInstallment, LoanProduct
+from app.models.turbo.loan import (
+    LoanAccount,
+    LoanApplication,
+    LoanApplicationStatus,
+    LoanCollateralKind,
+    LoanInstallment,
+    LoanProduct,
+)
 from app.services.turbo.loan_service import amortized_installment, build_schedule
 
 from .conftest import auth_headers, signup
@@ -99,6 +106,37 @@ async def _make_tier_1_tenant(client, business_name, owner_name, email):
     for offset in range(30):
         await _close(client, headers, _today() - timedelta(days=offset))
     return headers
+
+
+async def _approve(client, application_id, code="LOAN-TEST-01"):
+    """Signs up a champion into the *same* branch _seed_loan_products creates
+    — apply() routes a new application to a random branch via
+    pick_branch_for_province, so joining a fresh branch_code here would
+    create a second Branch and make every disburse-path test flaky depending
+    on which branch got picked. Walks the application through every review
+    stage to approved via the real branch endpoints."""
+    resp = await client.post(
+        "/api/v1/turbo/branch/signup",
+        json={
+            "branch_code": code,
+            "branch_name": "สาขาทดสอบ",
+            "province": "กรุงเทพ",
+            "staff_name": "Champion",
+            "email": f"champion-{uuid.uuid4()}@example.com",
+            "password": "Password123!",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    champion_headers = auth_headers(resp.json())
+
+    for to_status in ("doc_review", "collateral_check", "under_review", "approved"):
+        r = await client.post(
+            f"/api/v1/turbo/branch/loan-applications/{application_id}/advance",
+            json={"to_status": to_status},
+            headers=champion_headers,
+        )
+        assert r.status_code == 200, r.text
+    return champion_headers
 
 
 def test_amortized_installment_matches_hand_calculation():
@@ -270,6 +308,230 @@ async def test_apply_creates_submitted_application_matching_quote(client):
     assert len(listed.json()) == 1
 
 
+async def test_cannot_apply_while_another_application_is_in_flight(client):
+    headers = await _make_tier_1_tenant(client, "Shop H2", "Owner H2", "loan-h2@example.com")
+    body = {"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12}
+
+    first = await client.post("/api/v1/turbo/loans/applications", json=body, headers=headers)
+    assert first.status_code == 201, first.text
+
+    second = await client.post("/api/v1/turbo/loans/applications", json=body, headers=headers)
+    assert second.status_code == 400
+
+    eligibility = await client.get("/api/v1/turbo/loans/eligibility", headers=headers)
+    assert eligibility.json()["can_apply"] is False
+    assert eligibility.json()["in_flight_application_id"] == first.json()["id"]
+
+
+async def test_disburse_rejected_before_approval(client):
+    headers = await _make_tier_1_tenant(client, "Shop H3", "Owner H3", "loan-h3@example.com")
+    application = (
+        await client.post(
+            "/api/v1/turbo/loans/applications",
+            json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12},
+            headers=headers,
+        )
+    ).json()
+    assert application["status"] == "submitted"
+
+    resp = await client.post(f"/api/v1/turbo/loans/applications/{application['id']}/disburse", headers=headers)
+    assert resp.status_code == 400
+    assert "อนุมัติ" in resp.json()["detail"]
+
+
+async def test_rejected_application_blocks_reapply_within_cooldown(client, engine):
+    headers = await _make_tier_1_tenant(client, "Shop H4", "Owner H4", "loan-h4@example.com")
+    application = (
+        await client.post(
+            "/api/v1/turbo/loans/applications",
+            json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12},
+            headers=headers,
+        )
+    ).json()
+
+    resp = await client.post(
+        "/api/v1/turbo/branch/signup",
+        json={
+            "branch_code": "LOAN-TEST-01",
+            "branch_name": "สาขาทดสอบ",
+            "province": "กรุงเทพ",
+            "staff_name": "Champion",
+            "email": f"champion-{uuid.uuid4()}@example.com",
+            "password": "Password123!",
+        },
+    )
+    champion_headers = auth_headers(resp.json())
+    reject_resp = await client.post(
+        f"/api/v1/turbo/branch/loan-applications/{application['id']}/reject",
+        json={"reason": "เอกสารไม่ครบถ้วน"},
+        headers=champion_headers,
+    )
+    assert reject_resp.status_code == 200, reject_resp.text
+
+    again = await client.post(
+        "/api/v1/turbo/loans/applications",
+        json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12},
+        headers=headers,
+    )
+    assert again.status_code == 400
+    assert "ปฏิเสธ" in again.json()["detail"]
+
+    eligibility = (await client.get("/api/v1/turbo/loans/eligibility", headers=headers)).json()
+    assert eligibility["can_apply"] is False
+    assert eligibility["cooldown_until"] is not None
+
+
+async def test_reapply_allowed_after_cooldown(client, engine):
+    headers = await _make_tier_1_tenant(client, "Shop H5", "Owner H5", "loan-h5@example.com")
+    application = (
+        await client.post(
+            "/api/v1/turbo/loans/applications",
+            json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12},
+            headers=headers,
+        )
+    ).json()
+
+    session_factory = async_sessionmaker(engine)
+    async with session_factory() as session:
+        row = await session.get(LoanApplication, uuid.UUID(application["id"]))
+        row.status = LoanApplicationStatus.rejected
+        row.rejection_reason = "ทดสอบ"
+        row.decided_at = datetime.now(timezone.utc) - timedelta(days=8)
+        await session.commit()
+
+    eligibility = (await client.get("/api/v1/turbo/loans/eligibility", headers=headers)).json()
+    assert eligibility["can_apply"] is True
+
+    again = await client.post(
+        "/api/v1/turbo/loans/applications",
+        json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12},
+        headers=headers,
+    )
+    assert again.status_code == 201, again.text
+
+
+async def test_application_detail_includes_event_timeline(client):
+    headers = await _make_tier_1_tenant(client, "Shop H6", "Owner H6", "loan-h6@example.com")
+    application = (
+        await client.post(
+            "/api/v1/turbo/loans/applications",
+            json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12},
+            headers=headers,
+        )
+    ).json()
+
+    detail = (
+        await client.get(f"/api/v1/turbo/loans/applications/{application['id']}", headers=headers)
+    ).json()
+    assert detail["status"] == "submitted"
+    assert len(detail["events"]) == 1
+    assert detail["events"][0]["to_status"] == "submitted"
+    assert detail["events"][0]["actor_kind"] == "merchant"
+    assert detail["next_stage_eta_seconds"] is not None
+    assert detail["can_reapply_at"] is None
+
+
+async def test_auto_advance_moves_stage_after_configured_seconds(client, engine):
+    headers = await _make_tier_1_tenant(client, "Shop H7", "Owner H7", "loan-h7@example.com")
+    application = (
+        await client.post(
+            "/api/v1/turbo/loans/applications",
+            json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12},
+            headers=headers,
+        )
+    ).json()
+
+    session_factory = async_sessionmaker(engine)
+    async with session_factory() as session:
+        row = await session.get(LoanApplication, uuid.UUID(application["id"]))
+        row.stage_started_at = datetime.now(timezone.utc) - timedelta(seconds=25)  # submitted waits 20s
+        await session.commit()
+
+    detail = (
+        await client.get(f"/api/v1/turbo/loans/applications/{application['id']}", headers=headers)
+    ).json()
+    assert detail["status"] == "doc_review"
+    system_events = [e for e in detail["events"] if e["actor_kind"] == "system"]
+    assert len(system_events) == 1
+    assert system_events[0]["from_status"] == "submitted"
+    assert system_events[0]["to_status"] == "doc_review"
+
+
+async def test_auto_advance_catches_up_multiple_stages_in_one_read(client, engine):
+    headers = await _make_tier_1_tenant(client, "Shop H8", "Owner H8", "loan-h8@example.com")
+    application = (
+        await client.post(
+            "/api/v1/turbo/loans/applications",
+            json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12},
+            headers=headers,
+        )
+    ).json()
+
+    # Long enough to clear submitted (20s) + doc_review (30s) + collateral_check
+    # (30s), landing in under_review, in a single read.
+    session_factory = async_sessionmaker(engine)
+    async with session_factory() as session:
+        row = await session.get(LoanApplication, uuid.UUID(application["id"]))
+        row.stage_started_at = datetime.now(timezone.utc) - timedelta(seconds=90)
+        await session.commit()
+
+    detail = (
+        await client.get(f"/api/v1/turbo/loans/applications/{application['id']}", headers=headers)
+    ).json()
+    assert detail["status"] == "under_review"
+    system_events = [e for e in detail["events"] if e["actor_kind"] == "system"]
+    assert len(system_events) == 3
+
+
+async def test_auto_advance_never_rejects_and_never_disburses(client, engine):
+    headers = await _make_tier_1_tenant(client, "Shop H9", "Owner H9", "loan-h9@example.com")
+    application = (
+        await client.post(
+            "/api/v1/turbo/loans/applications",
+            json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12},
+            headers=headers,
+        )
+    ).json()
+
+    # An absurdly long elapsed time still only carries the clock to
+    # "approved" — never past it, since only disburse() (tenant) can move an
+    # approved application on, and only reject() (a human) can reject one.
+    session_factory = async_sessionmaker(engine)
+    async with session_factory() as session:
+        row = await session.get(LoanApplication, uuid.UUID(application["id"]))
+        row.stage_started_at = datetime.now(timezone.utc) - timedelta(days=30)
+        await session.commit()
+
+    detail = (
+        await client.get(f"/api/v1/turbo/loans/applications/{application['id']}", headers=headers)
+    ).json()
+    assert detail["status"] == "approved"
+    assert all(e["to_status"] not in ("rejected", "disbursed") for e in detail["events"])
+
+
+async def test_fast_forward_advances_exactly_one_stage(client):
+    headers = await _make_tier_1_tenant(client, "Shop H10", "Owner H10", "loan-h10@example.com")
+    application = (
+        await client.post(
+            "/api/v1/turbo/loans/applications",
+            json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12},
+            headers=headers,
+        )
+    ).json()
+    assert application["status"] == "submitted"
+
+    resp = await client.post(
+        f"/api/v1/turbo/loans/applications/{application['id']}/demo/fast-forward", headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "doc_review"
+
+    resp2 = await client.post(
+        f"/api/v1/turbo/loans/applications/{application['id']}/demo/fast-forward", headers=headers
+    )
+    assert resp2.json()["status"] == "collateral_check"
+
+
 async def test_disburse_creates_account_with_full_schedule(client):
     headers = await _make_tier_1_tenant(client, "Shop I", "Owner I", "loan-i@example.com")
 
@@ -285,6 +547,7 @@ async def test_disburse_creates_account_with_full_schedule(client):
             headers=headers,
         )
     ).json()
+    await _approve(client, application["id"])
 
     resp = await client.post(
         f"/api/v1/turbo/loans/applications/{application['id']}/disburse", headers=headers
@@ -327,6 +590,7 @@ async def test_account_summary_reports_overdue_count_amount_and_max_days(client,
             headers=headers,
         )
     ).json()
+    await _approve(client, application["id"])
     account = (
         await client.post(f"/api/v1/turbo/loans/applications/{application['id']}/disburse", headers=headers)
     ).json()
@@ -370,6 +634,7 @@ async def test_cannot_disburse_same_application_twice(client):
             headers=headers,
         )
     ).json()
+    await _approve(client, application["id"])
 
     first = await client.post(f"/api/v1/turbo/loans/applications/{application['id']}/disburse", headers=headers)
     assert first.status_code == 200, first.text
@@ -394,6 +659,7 @@ async def test_cannot_disburse_second_loan_while_one_is_active(client):
                 headers=headers,
             )
         ).json()
+        await _approve(client, application["id"])
         return await client.post(f"/api/v1/turbo/loans/applications/{application['id']}/disburse", headers=headers)
 
     first = await _apply_and_disburse()
@@ -413,6 +679,7 @@ async def test_pay_installment_marks_paid_and_rejects_double_payment(client):
             headers=headers,
         )
     ).json()
+    await _approve(client, application["id"])
     account = (
         await client.post(f"/api/v1/turbo/loans/applications/{application['id']}/disburse", headers=headers)
     ).json()
@@ -451,6 +718,7 @@ async def test_pay_installment_rejects_underpayment(client):
             headers=headers,
         )
     ).json()
+    await _approve(client, application["id"])
     account = (
         await client.post(f"/api/v1/turbo/loans/applications/{application['id']}/disburse", headers=headers)
     ).json()
@@ -482,6 +750,7 @@ async def test_account_closes_when_all_installments_paid(client):
             headers=headers,
         )
     ).json()
+    await _approve(client, application["id"])
     account = (
         await client.post(f"/api/v1/turbo/loans/applications/{application['id']}/disburse", headers=headers)
     ).json()
@@ -504,22 +773,51 @@ async def test_account_closes_when_all_installments_paid(client):
 async def test_concurrent_disburse_only_creates_one_active_account(client, engine):
     headers = await _make_tier_1_tenant(client, "Shop P", "Owner P", "loan-p@example.com")
 
-    async def _apply():
-        resp = await client.post(
+    application = (
+        await client.post(
             "/api/v1/turbo/loans/applications",
             json={"product_code": "motorcycle", "requested_amount": "3000", "collateral_value": "20000", "term_months": 12},
             headers=headers,
         )
-        assert resp.status_code == 201, resp.text
-        return resp.json()["id"]
+    ).json()
+    await _approve(client, application["id"])
 
-    application_ids = [await _apply(), await _apply()]
+    # A second *already-approved* application for the same tenant, inserted
+    # directly — apply()'s one-in-flight-application guard makes two
+    # concurrently-approved applications unreachable through the API now,
+    # but disburse()'s IntegrityError backstop is still real defense-in-depth
+    # worth testing on its own (a direct DB write, same technique the plan
+    # for this feature calls out for disburse-mechanics-only tests).
+    session_factory = async_sessionmaker(engine)
+    async with session_factory() as session:
+        original = await session.get(LoanApplication, uuid.UUID(application["id"]))
+        clone = LoanApplication(
+            tenant_id=original.tenant_id,
+            product_id=original.product_id,
+            requested_amount=original.requested_amount,
+            collateral_value=original.collateral_value,
+            collateral_detail=original.collateral_detail,
+            term_months=original.term_months,
+            approved_amount=original.approved_amount,
+            monthly_installment=original.monthly_installment,
+            monthly_interest_rate_snapshot=original.monthly_interest_rate_snapshot,
+            income_profile_snapshot=original.income_profile_snapshot,
+            credit_tier_snapshot=original.credit_tier_snapshot,
+            assigned_branch_id=original.assigned_branch_id,
+            status=LoanApplicationStatus.approved,
+        )
+        session.add(clone)
+        await session.flush()
+        # Must read clone.id *before* commit() — commit() expires instance
+        # attributes by default, and a plain sync attribute access after
+        # that needs an implicit reload that async sessions can't do outside
+        # an awaited call (raises MissingGreenlet).
+        second_application_id = str(clone.id)
+        await session.commit()
 
     responses = await asyncio.gather(
-        *(
-            client.post(f"/api/v1/turbo/loans/applications/{app_id}/disburse", headers=headers)
-            for app_id in application_ids
-        )
+        client.post(f"/api/v1/turbo/loans/applications/{application['id']}/disburse", headers=headers),
+        client.post(f"/api/v1/turbo/loans/applications/{second_application_id}/disburse", headers=headers),
     )
     assert sorted(r.status_code for r in responses) == [200, 400]
 
@@ -544,3 +842,15 @@ async def test_cashier_cannot_access_loan_endpoints(client):
 
     resp = await client.get("/api/v1/turbo/loans/products", headers=cashier_headers)
     assert resp.status_code == 403
+
+    assert (await client.get("/api/v1/turbo/loans/eligibility", headers=cashier_headers)).status_code == 403
+    assert (
+        await client.get(
+            f"/api/v1/turbo/loans/applications/{uuid.uuid4()}", headers=cashier_headers
+        )
+    ).status_code == 403
+    assert (
+        await client.post(
+            f"/api/v1/turbo/loans/applications/{uuid.uuid4()}/demo/fast-forward", headers=cashier_headers
+        )
+    ).status_code == 403

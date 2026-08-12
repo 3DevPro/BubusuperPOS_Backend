@@ -1,20 +1,30 @@
 import calendar
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tenancy import TenantContext
-from app.core.turbo_config import LOAN_LTV
+from app.core.turbo_config import (
+    LOAN_AUTO_ADVANCE_ENABLED,
+    LOAN_AUTO_APPROVE_ENABLED,
+    LOAN_DEMO_FAST_FORWARD_ENABLED,
+    LOAN_LTV,
+    LOAN_REJECT_COOLDOWN_DAYS,
+    LOAN_REVIEW_STAGES,
+    LOAN_STAGE_AUTO_ADVANCE_SECONDS,
+)
 from app.models.tenant import Tenant
 from app.models.turbo.branch import Lead, LeadSource
 from app.models.turbo.loan import (
     LoanAccount,
     LoanAccountStatus,
     LoanApplication,
+    LoanApplicationEvent,
     LoanApplicationStatus,
     LoanInstallment,
     LoanInstallmentStatus,
@@ -24,6 +34,10 @@ from app.models.user import User
 from app.schemas.turbo.loan import (
     LoanAccountResponse,
     LoanAccountSummaryResponse,
+    LoanApplicationDetailResponse,
+    LoanApplicationEventResponse,
+    LoanCollateralDetail,
+    LoanEligibilityResponse,
     LoanInstallmentResponse,
     LoanQuoteResponse,
 )
@@ -35,6 +49,31 @@ from app.services.turbo.credit_service import is_on_time
 from app.services.turbo.daily_close_service import today_local
 
 _CENTS = Decimal("0.01")
+
+# A plain dict, not a state-machine class/library — nothing else in this
+# project uses that kind of abstraction, and one guard clause per transition
+# is all this needs. approved/rejected/disbursed have no outgoing review
+# transitions: approved only moves via disburse() (tenant-side), rejected
+# and disbursed are terminal.
+_ALLOWED_TRANSITIONS: dict[LoanApplicationStatus, tuple[LoanApplicationStatus, ...]] = {
+    LoanApplicationStatus.submitted: (LoanApplicationStatus.doc_review, LoanApplicationStatus.rejected),
+    LoanApplicationStatus.doc_review: (LoanApplicationStatus.collateral_check, LoanApplicationStatus.rejected),
+    LoanApplicationStatus.collateral_check: (LoanApplicationStatus.under_review, LoanApplicationStatus.rejected),
+    LoanApplicationStatus.under_review: (LoanApplicationStatus.approved, LoanApplicationStatus.rejected),
+    LoanApplicationStatus.approved: (),
+    LoanApplicationStatus.rejected: (),
+    LoanApplicationStatus.disbursed: (),
+}
+# An application in any of these statuses still has an outcome pending —
+# apply()'s "one application at a time" guard blocks a new one while any of
+# these exist.
+_IN_FLIGHT_STATUSES = (
+    LoanApplicationStatus.submitted,
+    LoanApplicationStatus.doc_review,
+    LoanApplicationStatus.collateral_check,
+    LoanApplicationStatus.under_review,
+    LoanApplicationStatus.approved,
+)
 
 
 def _q(value: Decimal) -> Decimal:
@@ -173,7 +212,29 @@ async def apply(
     requested_amount: Decimal,
     collateral_value: Decimal,
     term_months: int,
+    collateral_detail: LoanCollateralDetail | None = None,
 ) -> LoanApplication:
+    # 1. One application in flight at a time — see _IN_FLIGHT_STATUSES.
+    existing = await ctx.db.scalar(
+        ctx.scoped(LoanApplication).where(LoanApplication.status.in_(_IN_FLIGHT_STATUSES))
+    )
+    if existing is not None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "มีคำขอสินเชื่อที่กำลังพิจารณาอยู่แล้ว")
+
+    # 2. Cooldown after the most recent rejection.
+    last_rejected_at = await ctx.db.scalar(
+        select(func.max(LoanApplication.decided_at)).where(
+            LoanApplication.tenant_id == ctx.tenant_id,
+            LoanApplication.status == LoanApplicationStatus.rejected,
+        )
+    )
+    now = datetime.now(timezone.utc)
+    if last_rejected_at is not None:
+        available_at = last_rejected_at + timedelta(days=LOAN_REJECT_COOLDOWN_DAYS)
+        if now < available_at:
+            days = (available_at - now).days + 1
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"คำขอก่อนหน้าถูกปฏิเสธ ยื่นใหม่ได้ในอีก {days} วัน")
+
     product, quoted, snapshot, credit_tier = await quote(
         ctx, product_code, requested_amount, collateral_value, term_months
     )
@@ -203,6 +264,7 @@ async def apply(
         product_id=product.id,
         requested_amount=_q(requested_amount),
         collateral_value=_q(collateral_value),
+        collateral_detail=(collateral_detail or LoanCollateralDetail()).model_dump(),
         term_months=term_months,
         approved_amount=quoted.approved_amount,
         monthly_installment=quoted.monthly_installment,
@@ -213,8 +275,21 @@ async def apply(
         assigned_branch_id=branch.id,
         lead_id=lead.id,
         status=LoanApplicationStatus.submitted,
+        stage_started_at=now,
     )
     ctx.db.add(application)
+    await ctx.db.flush()
+    ctx.db.add(
+        LoanApplicationEvent(
+            application_id=application.id,
+            tenant_id=ctx.tenant_id,
+            from_status=None,
+            to_status=LoanApplicationStatus.submitted.value,
+            actor_user_id=ctx.user_id,
+            actor_name=user.name if user else "-",
+            actor_kind="merchant",
+        )
+    )
     await audit_service.record(
         ctx, "loan.apply", f"ยื่นขอสินเชื่อ {product.name} วงเงิน {quoted.approved_amount} บาท"
     )
@@ -224,8 +299,183 @@ async def apply(
 
 
 async def list_applications(ctx: TenantContext) -> list[LoanApplication]:
-    result = await ctx.db.scalars(ctx.scoped(LoanApplication).order_by(LoanApplication.created_at.desc()))
-    return list(result)
+    applications = list(
+        await ctx.db.scalars(ctx.scoped(LoanApplication).order_by(LoanApplication.created_at.desc()))
+    )
+    now = datetime.now(timezone.utc)
+    for application in applications:
+        await _auto_advance(ctx.db, application, now)
+    return applications
+
+
+async def _auto_advance(db: AsyncSession, application: LoanApplication, now: datetime) -> bool:
+    """Write-behind clock: advances a review-stage application past however
+    many stages its elapsed stage time covers, writing one event per stage
+    it crosses. Unlike LoanInstallment.is_overdue (computed at read time,
+    never written), this *must* persist: a Champion's decision has to land
+    in the DB, disburse() guards on approved actually being there, and the
+    timeline needs real event rows — there's no scheduler/background task
+    anywhere in this app (see app/main.py) to do it any other way.
+
+    Hard rule this relies on: the clock never rejects and never disburses.
+    Only a human (reject) or the tenant themselves (disburse) can do those —
+    see loan_review_service.reject and this module's disburse(). That's what
+    lets a Champion's button press always win a race against this clock:
+    stage_started_at resets on every human transition too, so the clock
+    only ever fires when nobody has acted in time.
+    """
+    if not LOAN_AUTO_ADVANCE_ENABLED:
+        return False
+
+    changed = False
+    while application.status.value in LOAN_REVIEW_STAGES:
+        wait_seconds = LOAN_STAGE_AUTO_ADVANCE_SECONDS[application.status.value]
+        elapsed = (now - application.stage_started_at).total_seconds()
+        if elapsed < wait_seconds:
+            break
+
+        next_status = next(s for s in _ALLOWED_TRANSITIONS[application.status] if s != LoanApplicationStatus.rejected)
+        if next_status == LoanApplicationStatus.approved and not LOAN_AUTO_APPROVE_ENABLED:
+            break
+
+        from_status = application.status
+        application.status = next_status
+        # += the stage's own duration, not = now — so a long gap between
+        # reads (nobody polled for a while) still catches up one stage per
+        # loop iteration with the right elapsed-time accounting, instead of
+        # collapsing multiple overdue stages into a single now-anchored one.
+        application.stage_started_at = application.stage_started_at + timedelta(seconds=wait_seconds)
+        if next_status == LoanApplicationStatus.approved:
+            application.decided_at = now
+        db.add(
+            LoanApplicationEvent(
+                application_id=application.id,
+                tenant_id=application.tenant_id,
+                from_status=from_status.value,
+                to_status=next_status.value,
+                actor_user_id=None,
+                actor_name="ระบบ",
+                actor_kind="system",
+            )
+        )
+        changed = True
+
+    if changed:
+        await db.commit()
+        await db.refresh(application)
+    return changed
+
+
+async def _application_events(db: AsyncSession, application_id: uuid.UUID) -> list[LoanApplicationEvent]:
+    return list(
+        await db.scalars(
+            select(LoanApplicationEvent)
+            .where(LoanApplicationEvent.application_id == application_id)
+            .order_by(LoanApplicationEvent.created_at)
+        )
+    )
+
+
+def _next_stage_eta_seconds(application: LoanApplication, now: datetime) -> int | None:
+    if not LOAN_AUTO_ADVANCE_ENABLED or application.status.value not in LOAN_REVIEW_STAGES:
+        return None
+    wait_seconds = LOAN_STAGE_AUTO_ADVANCE_SECONDS[application.status.value]
+    elapsed = (now - application.stage_started_at).total_seconds()
+    return max(0, int(wait_seconds - elapsed))
+
+
+async def _to_detail_response(db: AsyncSession, application: LoanApplication) -> LoanApplicationDetailResponse:
+    now = datetime.now(timezone.utc)
+    events = await _application_events(db, application.id)
+    can_reapply_at = None
+    if application.status == LoanApplicationStatus.rejected and application.decided_at is not None:
+        can_reapply_at = application.decided_at + timedelta(days=LOAN_REJECT_COOLDOWN_DAYS)
+    return LoanApplicationDetailResponse(
+        id=application.id,
+        product_id=application.product_id,
+        requested_amount=application.requested_amount,
+        collateral_value=application.collateral_value,
+        collateral_detail=application.collateral_detail,
+        term_months=application.term_months,
+        approved_amount=application.approved_amount,
+        monthly_installment=application.monthly_installment,
+        monthly_interest_rate_snapshot=application.monthly_interest_rate_snapshot,
+        credit_tier_snapshot=application.credit_tier_snapshot,
+        cap_reasons=application.cap_reasons,
+        status=application.status.value,
+        rejection_reason=application.rejection_reason,
+        stage_started_at=application.stage_started_at,
+        created_at=application.created_at,
+        decided_at=application.decided_at,
+        next_stage_eta_seconds=_next_stage_eta_seconds(application, now),
+        can_reapply_at=can_reapply_at,
+        events=[LoanApplicationEventResponse.model_validate(e) for e in events],
+    )
+
+
+async def get_application(ctx: TenantContext, application_id: uuid.UUID) -> LoanApplicationDetailResponse:
+    application = await ctx.db.scalar(ctx.scoped(LoanApplication).where(LoanApplication.id == application_id))
+    if application is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "loan application not found")
+    await _auto_advance(ctx.db, application, datetime.now(timezone.utc))
+    return await _to_detail_response(ctx.db, application)
+
+
+async def check_eligibility(ctx: TenantContext) -> LoanEligibilityResponse:
+    """Same two guards apply() enforces, surfaced ahead of time so the
+    frontend can grey out the "ยื่นขอสินเชื่อ" button with a reason instead of
+    letting the tenant fill in the whole form and only then hit a 400."""
+    existing = await ctx.db.scalar(
+        ctx.scoped(LoanApplication).where(LoanApplication.status.in_(_IN_FLIGHT_STATUSES))
+    )
+    if existing is not None:
+        return LoanEligibilityResponse(
+            can_apply=False,
+            reason="มีคำขอสินเชื่อที่กำลังพิจารณาอยู่แล้ว",
+            cooldown_until=None,
+            in_flight_application_id=existing.id,
+        )
+
+    last_rejected_at = await ctx.db.scalar(
+        select(func.max(LoanApplication.decided_at)).where(
+            LoanApplication.tenant_id == ctx.tenant_id,
+            LoanApplication.status == LoanApplicationStatus.rejected,
+        )
+    )
+    if last_rejected_at is not None:
+        available_at = last_rejected_at + timedelta(days=LOAN_REJECT_COOLDOWN_DAYS)
+        if datetime.now(timezone.utc) < available_at:
+            return LoanEligibilityResponse(
+                can_apply=False,
+                reason="คำขอก่อนหน้าถูกปฏิเสธ ยังอยู่ในช่วงรอ",
+                cooldown_until=available_at,
+                in_flight_application_id=None,
+            )
+
+    return LoanEligibilityResponse(can_apply=True, reason=None, cooldown_until=None, in_flight_application_id=None)
+
+
+async def fast_forward_application(ctx: TenantContext, application_id: uuid.UUID) -> LoanApplicationDetailResponse:
+    """Stands in for the old "รับเงินทันที (เดโม)" shortcut, honestly this
+    time: it still lets a solo demo skip the wait with one tap, but it walks
+    the same _auto_advance transition path as the real clock (same event
+    rows, same guards) rather than jumping straight to an outcome. It can't
+    skip under_review -> approved if auto-approve is off — that's not a
+    backdoor to approved, only a way to make the *clock* think the current
+    stage's wait is already over."""
+    if not LOAN_DEMO_FAST_FORWARD_ENABLED:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
+
+    application = await ctx.db.scalar(ctx.scoped(LoanApplication).where(LoanApplication.id == application_id))
+    if application is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "loan application not found")
+
+    if application.status.value in LOAN_REVIEW_STAGES:
+        wait_seconds = LOAN_STAGE_AUTO_ADVANCE_SECONDS[application.status.value]
+        application.stage_started_at = datetime.now(timezone.utc) - timedelta(seconds=wait_seconds)
+        await ctx.db.flush()
+    await _auto_advance(ctx.db, application, datetime.now(timezone.utc))
+    return await _to_detail_response(ctx.db, application)
 
 
 async def _next_account_number(ctx: TenantContext) -> str:
@@ -248,6 +498,8 @@ async def disburse(ctx: TenantContext, application_id: uuid.UUID) -> LoanAccount
         raise HTTPException(status.HTTP_404_NOT_FOUND, "loan application not found")
     if application.status == LoanApplicationStatus.disbursed:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "สินเชื่อนี้เบิกจ่ายไปแล้ว")
+    if application.status != LoanApplicationStatus.approved:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "คำขอนี้ยังไม่ได้รับอนุมัติ ไม่สามารถเบิกจ่ายได้")
 
     existing_active = await _active_account(ctx)
     if existing_active is not None:
@@ -287,8 +539,21 @@ async def disburse(ctx: TenantContext, application_id: uuid.UUID) -> LoanAccount
             )
         )
 
+    from_status = application.status
     application.status = LoanApplicationStatus.disbursed
     application.decided_at = now
+    actor_name = await ctx.db.scalar(select(User.name).where(User.id == ctx.user_id))
+    ctx.db.add(
+        LoanApplicationEvent(
+            application_id=application.id,
+            tenant_id=ctx.tenant_id,
+            from_status=from_status.value,
+            to_status=LoanApplicationStatus.disbursed.value,
+            actor_user_id=ctx.user_id,
+            actor_name=actor_name or "-",
+            actor_kind="merchant",
+        )
+    )
     await audit_service.record(
         ctx, "loan.disburse", f"เบิกจ่ายสินเชื่อ {account.account_number} จำนวน {account.principal} บาท"
     )
