@@ -16,6 +16,7 @@ from app.schemas.turbo.branch import (
     LeaderboardEntryResponse,
     LeadRespondRequest,
     LeadResponse,
+    ProspectApplicationInterestUpdateRequest,
     ProspectContactStatusUpdateRequest,
     ProspectCreateRequest,
     ProspectResponse,
@@ -55,6 +56,13 @@ async def update_prospect_contact_status(
     prospect_id: uuid.UUID, body: ProspectContactStatusUpdateRequest, ctx: CurrentBranch
 ) -> MerchantProspect:
     return await branch_service.update_prospect_contact_status(ctx, prospect_id, body)
+
+
+@router.post("/prospects/{prospect_id}/application-interest", response_model=ProspectResponse)
+async def update_prospect_application_interest(
+    prospect_id: uuid.UUID, body: ProspectApplicationInterestUpdateRequest, ctx: CurrentBranch
+) -> MerchantProspect:
+    return await branch_service.update_prospect_application_interest(ctx, prospect_id, body)
 
 
 @router.delete("/prospects/{prospect_id}", status_code=status.HTTP_204_NO_CONTENT)

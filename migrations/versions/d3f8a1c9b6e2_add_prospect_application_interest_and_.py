@@ -22,7 +22,7 @@ def upgrade() -> None:
     bind = op.get_bind()
 
     application_interest_enum = sa.Enum(
-        'not_applied', 'applied_loan', 'applied_insurance', name='prospectapplicationinterest'
+        'not_applied', 'applied_loan', 'applied_insurance', 'applied_both', name='prospectapplicationinterest'
     )
     application_interest_enum.create(bind, checkfirst=True)
     op.add_column(

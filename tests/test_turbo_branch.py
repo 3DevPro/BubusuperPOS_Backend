@@ -96,6 +96,80 @@ async def test_create_and_list_prospects(client):
     assert listed.json()[0]["name"] == "ร้านส้มตำป้าแดง"
 
 
+async def test_create_prospect_ignores_contact_status_in_the_request(client):
+    """A prospect always starts not_scheduled regardless of what's sent — see
+    ProspectCreateRequest's comment. Letting the caller set called/met at
+    creation would let the leaderboard be gamed with backdated activity."""
+    tokens = await _branch_signup(client, "BKK-024", "champion-y@example.com")
+    headers = auth_headers(tokens)
+
+    resp = await client.post(
+        "/api/v1/turbo/branch/prospects",
+        json={"name": "ร้านลัด", "contact_status": "met"},
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["contact_status"] == "not_scheduled"
+    assert body["called_at"] is None
+    assert body["met_at"] is None
+    assert body["contact_status_updated_at"] is None
+
+
+async def test_update_prospect_application_interest(client):
+    tokens = await _branch_signup(client, "BKK-025", "champion-z@example.com")
+    headers = auth_headers(tokens)
+    prospect = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านผลไม้"}, headers=headers)
+    ).json()
+    assert prospect["application_interest"] == "not_applied"
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/application-interest",
+        json={"application_interest": "applied_both"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["application_interest"] == "applied_both"
+
+
+async def test_update_prospect_application_interest_from_other_branch_is_404(client):
+    tokens_a = await _branch_signup(client, "BKK-026", "champion-aa@example.com")
+    tokens_b = await _branch_signup(client, "BKK-027", "champion-bb@example.com")
+
+    prospect = (
+        await client.post(
+            "/api/v1/turbo/branch/prospects", json={"name": "ร้าน A"}, headers=auth_headers(tokens_a)
+        )
+    ).json()
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/application-interest",
+        json={"application_interest": "applied_loan"},
+        headers=auth_headers(tokens_b),
+    )
+    assert resp.status_code == 404
+
+
+async def test_leaderboard_score_includes_prospects_contacted(client):
+    tokens = await _branch_signup(client, "BKK-028", "champion-cc@example.com")
+    headers = auth_headers(tokens)
+    prospect = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านโทร"}, headers=headers)
+    ).json()
+    await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/contact-status",
+        json={"contact_status": "called"},
+        headers=headers,
+    )
+
+    me = (await client.get("/api/v1/auth/me", headers=headers)).json()
+    resp = await client.get("/api/v1/turbo/branch/leaderboard", headers=headers)
+    row = next(r for r in resp.json() if r["branch_id"] == me["branch_id"])
+    assert row["prospects_contacted"] == 1
+    assert row["score"] == 1
+
+
 async def test_visit_prospect_updates_status_and_timestamp(client):
     tokens = await _branch_signup(client, "BKK-006", "champion-g@example.com")
     headers = auth_headers(tokens)

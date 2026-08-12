@@ -13,6 +13,7 @@ from app.schemas.turbo.branch import (
     BranchSignupRequest,
     LeaderboardEntryResponse,
     LeadRespondRequest,
+    ProspectApplicationInterestUpdateRequest,
     ProspectContactStatusUpdateRequest,
     ProspectCreateRequest,
     ProspectVisitRequest,
@@ -71,7 +72,8 @@ async def list_prospects(ctx: BranchContext) -> list[MerchantProspect]:
 
 
 async def create_prospect(ctx: BranchContext, body: ProspectCreateRequest) -> MerchantProspect:
-    now = datetime.now(timezone.utc)
+    # contact_status always starts not_scheduled (the model default) — see
+    # ProspectCreateRequest's comment for why it can't be set here.
     prospect = MerchantProspect(
         branch_id=ctx.branch_id,
         name=body.name,
@@ -79,10 +81,6 @@ async def create_prospect(ctx: BranchContext, body: ProspectCreateRequest) -> Me
         address=body.address,
         phone=body.phone,
         application_interest=body.application_interest,
-        contact_status=body.contact_status,
-        contact_status_updated_at=now,
-        called_at=now if body.contact_status == ProspectContactStatus.called else None,
-        met_at=now if body.contact_status == ProspectContactStatus.met else None,
     )
     ctx.db.add(prospect)
     await ctx.db.commit()
@@ -90,10 +88,15 @@ async def create_prospect(ctx: BranchContext, body: ProspectCreateRequest) -> Me
     return prospect
 
 
-async def visit_prospect(ctx: BranchContext, prospect_id, body: ProspectVisitRequest) -> MerchantProspect:
+async def _get_prospect_or_404(ctx: BranchContext, prospect_id) -> MerchantProspect:
     prospect = await ctx.db.scalar(ctx.scoped(MerchantProspect).where(MerchantProspect.id == prospect_id))
     if prospect is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "prospect not found")
+    return prospect
+
+
+async def visit_prospect(ctx: BranchContext, prospect_id, body: ProspectVisitRequest) -> MerchantProspect:
+    prospect = await _get_prospect_or_404(ctx, prospect_id)
 
     prospect.status = body.status
     prospect.note = body.note
@@ -104,9 +107,7 @@ async def visit_prospect(ctx: BranchContext, prospect_id, body: ProspectVisitReq
 
 
 async def delete_prospect(ctx: BranchContext, prospect_id) -> None:
-    prospect = await ctx.db.scalar(ctx.scoped(MerchantProspect).where(MerchantProspect.id == prospect_id))
-    if prospect is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "prospect not found")
+    prospect = await _get_prospect_or_404(ctx, prospect_id)
 
     await ctx.db.delete(prospect)
     try:
@@ -127,9 +128,7 @@ async def update_prospect_contact_status(
     # Separate from visit_prospect on purpose — contact history (call/met/
     # unreachable) is logged the moment a Champion taps it, with no note or
     # visit-outcome bundled in, unlike the Morning Route visit flow above.
-    prospect = await ctx.db.scalar(ctx.scoped(MerchantProspect).where(MerchantProspect.id == prospect_id))
-    if prospect is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "prospect not found")
+    prospect = await _get_prospect_or_404(ctx, prospect_id)
 
     now = datetime.now(timezone.utc)
     prospect.contact_status = body.contact_status
@@ -140,6 +139,17 @@ async def update_prospect_contact_status(
         prospect.called_at = now
     elif body.contact_status == ProspectContactStatus.met:
         prospect.met_at = now
+    await ctx.db.commit()
+    await ctx.db.refresh(prospect)
+    return prospect
+
+
+async def update_prospect_application_interest(
+    ctx: BranchContext, prospect_id, body: ProspectApplicationInterestUpdateRequest
+) -> MerchantProspect:
+    prospect = await _get_prospect_or_404(ctx, prospect_id)
+
+    prospect.application_interest = body.application_interest
     await ctx.db.commit()
     await ctx.db.refresh(prospect)
     return prospect
@@ -232,9 +242,10 @@ async def leaderboard(ctx: BranchContext) -> list[LeaderboardEntryResponse]:
             prospects_visited=row[2],
             prospects_contacted=row[3],
             leads_contacted=row[4],
-            # Weighted so a Champion can't top the board on visits alone —
-            # actually landing a lead (contacted) counts for more.
-            score=row[2] + row[4] * 2,
+            # Weighted so a Champion can't top the board on calls alone — an
+            # in-person visit outweighs a call, and actually landing a lead
+            # outweighs both.
+            score=row[2] + row[3] + row[4] * 2,
         )
         for row in rows
     ]

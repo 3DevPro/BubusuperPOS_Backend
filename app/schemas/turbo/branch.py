@@ -39,7 +39,11 @@ class ProspectCreateRequest(BaseModel):
     address: str | None = Field(default=None, max_length=500)
     phone: str | None = Field(default=None, max_length=32)
     application_interest: ProspectApplicationInterest = ProspectApplicationInterest.not_applied
-    contact_status: ProspectContactStatus = ProspectContactStatus.not_scheduled
+    # No contact_status here on purpose — a prospect always starts
+    # not_scheduled and can only move to called/met through
+    # update_prospect_contact_status, so the leaderboard's called_at/met_at
+    # timestamps always reflect a real, individually-timestamped action
+    # rather than something backdated at creation time.
 
 
 class ProspectVisitRequest(BaseModel):
@@ -51,6 +55,10 @@ class ProspectContactStatusUpdateRequest(BaseModel):
     contact_status: ProspectContactStatus
 
 
+class ProspectApplicationInterestUpdateRequest(BaseModel):
+    application_interest: ProspectApplicationInterest
+
+
 class ProspectResponse(BaseModel):
     id: uuid.UUID
     name: str
@@ -60,6 +68,9 @@ class ProspectResponse(BaseModel):
     status: MerchantProspectStatus
     application_interest: ProspectApplicationInterest
     contact_status: ProspectContactStatus
+    contact_status_updated_at: datetime | None
+    called_at: datetime | None
+    met_at: datetime | None
     note: str | None
     last_visited_at: datetime | None
     created_at: datetime

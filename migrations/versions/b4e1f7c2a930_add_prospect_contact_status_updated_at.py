@@ -1,7 +1,7 @@
 """add prospect contact_status_updated_at
 
 Revision ID: b4e1f7c2a930
-Revises: a7c2e94f1d08
+Revises: d3f8a1c9b6e2
 Create Date: 2026-08-12 09:00:00.000000
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'b4e1f7c2a930'
-down_revision: Union[str, None] = 'a7c2e94f1d08'
+down_revision: Union[str, None] = 'd3f8a1c9b6e2'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
