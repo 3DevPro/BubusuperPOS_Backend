@@ -1,11 +1,12 @@
 import uuid
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
-from app.core.deps import CurrentBranch
+from app.core.deps import CurrentBranch, CurrentTenant
 # Reuses auth.py's own token-issuing functions rather than importing its
 # private _issue_tokens — see the branch_signup handler below.
 from app.core.security import create_access_token, create_refresh_token
@@ -18,6 +19,7 @@ from app.schemas.turbo.branch import (
     LeadResponse,
     ProspectApplicationInterestUpdateRequest,
     ProspectContactStatusUpdateRequest,
+    NearbyBranchResponse,
     ProspectCreateRequest,
     ProspectResponse,
     ProspectVisitRequest,
@@ -34,6 +36,11 @@ async def branch_signup(body: BranchSignupRequest, db: Annotated[AsyncSession, D
         access_token=create_access_token(staff.id, None, staff.role.value, branch_id=staff.branch_id),
         refresh_token=create_refresh_token(staff.id, None, staff.role.value, branch_id=staff.branch_id),
     )
+
+
+@router.get("/nearby", response_model=list[NearbyBranchResponse])
+async def nearby_branches(lat: Decimal, lng: Decimal, ctx: CurrentTenant) -> list[NearbyBranchResponse]:
+    return await branch_service.list_nearby(ctx.db, lat, lng)
 
 
 @router.get("/prospects", response_model=list[ProspectResponse])

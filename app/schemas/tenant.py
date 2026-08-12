@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class TenantSettingsResponse(BaseModel):
     name: str
+    business_type: str | None
     currency: str
     timezone: str
     promptpay_id: str | None

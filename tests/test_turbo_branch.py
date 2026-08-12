@@ -5,10 +5,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.models.turbo.branch import Lead, LeadSource, MerchantProspect, ProspectContactStatus
 
-from .conftest import auth_headers
+from .conftest import auth_headers, signup
 
 
-async def _branch_signup(client, branch_code, email, staff_name="Champion", province="กรุงเทพ"):
+async def _branch_signup(
+    client, branch_code, email, staff_name="Champion", province="กรุงเทพ", lat=None, lng=None
+):
     resp = await client.post(
         "/api/v1/turbo/branch/signup",
         json={
@@ -18,6 +20,8 @@ async def _branch_signup(client, branch_code, email, staff_name="Champion", prov
             "staff_name": staff_name,
             "email": email,
             "password": "Password123!",
+            "lat": lat,
+            "lng": lng,
         },
     )
     assert resp.status_code == 201, resp.text
@@ -468,3 +472,36 @@ async def test_leaderboard_ignores_activity_outside_the_7_day_window(client, eng
     row = next(r for r in resp.json() if r["branch_id"] == me["branch_id"])
     assert row["prospects_visited"] == 0
     assert row["prospects_contacted"] == 0
+
+
+async def test_nearby_branches_are_sorted_by_distance(client):
+    # Bangkok (13.7563, 100.5018) as the caller's own position — the "near"
+    # branch is ~2km away, the "far" one ~400km away (Chiang Mai).
+    await _branch_signup(client, "BKK-NEAR", "champion-near@example.com", lat="13.7300", lng="100.5200")
+    await _branch_signup(client, "CNX-FAR", "champion-far@example.com", province="เชียงใหม่", lat="18.7883", lng="98.9853")
+
+    tokens = await signup(client, "Shop Nearby", "Owner Nearby", "nearby-owner@example.com")
+    headers = auth_headers(tokens)
+
+    resp = await client.get(
+        "/api/v1/turbo/branch/nearby", params={"lat": "13.7563", "lng": "100.5018"}, headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    results = resp.json()
+    assert results[0]["code"] == "BKK-NEAR"
+    assert results[0]["distance_km"] < 10
+    assert results[-1]["code"] == "CNX-FAR"
+    assert results[-1]["distance_km"] > 300
+
+
+async def test_branch_without_coordinates_is_excluded_from_nearby(client):
+    await _branch_signup(client, "BKK-NOCOORDS", "champion-nocoords@example.com")
+
+    tokens = await signup(client, "Shop NoCoords", "Owner NoCoords", "nocoords-owner@example.com")
+    headers = auth_headers(tokens)
+
+    resp = await client.get(
+        "/api/v1/turbo/branch/nearby", params={"lat": "13.7563", "lng": "100.5018"}, headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    assert "BKK-NOCOORDS" not in [b["code"] for b in resp.json()]

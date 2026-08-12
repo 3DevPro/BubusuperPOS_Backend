@@ -1,4 +1,6 @@
+import math
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, or_, select
@@ -15,9 +17,20 @@ from app.schemas.turbo.branch import (
     LeadRespondRequest,
     ProspectApplicationInterestUpdateRequest,
     ProspectContactStatusUpdateRequest,
+    NearbyBranchResponse,
     ProspectCreateRequest,
     ProspectVisitRequest,
 )
+
+_EARTH_RADIUS_KM = 6371.0
+
+
+def _haversine_km(lat1: Decimal, lng1: Decimal, lat2: Decimal, lng2: Decimal) -> float:
+    lat1_r, lng1_r, lat2_r, lng2_r = (math.radians(float(v)) for v in (lat1, lng1, lat2, lng2))
+    dlat = lat2_r - lat1_r
+    dlng = lng2_r - lng1_r
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlng / 2) ** 2
+    return _EARTH_RADIUS_KM * 2 * math.asin(math.sqrt(a))
 
 _LEADERBOARD_WINDOW = timedelta(days=7)
 
@@ -45,7 +58,9 @@ async def signup(db: AsyncSession, body: BranchSignupRequest) -> User:
     the normal case (a branch has more than one Champion), not an error."""
     branch = await db.scalar(select(Branch).where(Branch.code == body.branch_code))
     if branch is None:
-        branch = Branch(code=body.branch_code, name=body.branch_name, province=body.province)
+        branch = Branch(
+            code=body.branch_code, name=body.branch_name, province=body.province, lat=body.lat, lng=body.lng
+        )
         db.add(branch)
         await db.flush()
 
@@ -251,3 +266,26 @@ async def leaderboard(ctx: BranchContext) -> list[LeaderboardEntryResponse]:
     ]
     entries.sort(key=lambda e: e.score, reverse=True)
     return entries
+
+
+async def list_nearby(db: AsyncSession, lat: Decimal, lng: Decimal, limit: int = 5) -> list[NearbyBranchResponse]:
+    """Ranks every branch with known coordinates by great-circle distance
+    from (lat, lng) — a branch never got coordinates at signup can't be
+    ranked, so it's excluded rather than sorted arbitrarily. Distance math
+    happens in Python (no PostGIS in this stack) since the branch count is
+    small enough that this is never going to be the bottleneck."""
+    branches = await db.scalars(select(Branch).where(Branch.lat.is_not(None), Branch.lng.is_not(None)))
+    ranked = [
+        NearbyBranchResponse(
+            id=branch.id,
+            code=branch.code,
+            name=branch.name,
+            province=branch.province,
+            lat=branch.lat,
+            lng=branch.lng,
+            distance_km=_haversine_km(lat, lng, branch.lat, branch.lng),
+        )
+        for branch in branches
+    ]
+    ranked.sort(key=lambda b: b.distance_km)
+    return ranked[:limit]

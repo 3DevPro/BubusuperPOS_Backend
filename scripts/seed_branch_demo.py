@@ -40,8 +40,20 @@ _now = lambda: datetime.now(timezone.utc)  # noqa: E731
 _STAFF_EMAIL = "test2@test.com"
 _STAFF_PASSWORD = "12345678"
 
-_MAIN_BRANCH = {"code": "BKK-CENTRAL", "name": "สาขาสีลม", "province": "กรุงเทพ"}
-_RIVAL_BRANCH = {"code": "BKK-THONGLOR", "name": "สาขาทองหล่อ", "province": "กรุงเทพ"}
+_MAIN_BRANCH = {
+    "code": "BKK-CENTRAL",
+    "name": "สาขาสีลม",
+    "province": "กรุงเทพ",
+    "lat": Decimal("13.724800"),
+    "lng": Decimal("100.534200"),
+}
+_RIVAL_BRANCH = {
+    "code": "BKK-THONGLOR",
+    "name": "สาขาทองหล่อ",
+    "province": "กรุงเทพ",
+    "lat": Decimal("13.730800"),
+    "lng": Decimal("100.581100"),
+}
 
 _PROSPECTS = [
     {"name": "ร้านส้มตำป้าแดง", "business_type": "food", "phone": "0811111111", "status": MerchantProspectStatus.visited},
@@ -65,7 +77,9 @@ _LEADS = [
 async def _get_or_create_branch(db, spec: dict) -> Branch:
     branch = await db.scalar(select(Branch).where(Branch.code == spec["code"]))
     if branch is None:
-        branch = Branch(code=spec["code"], name=spec["name"], province=spec["province"])
+        branch = Branch(
+            code=spec["code"], name=spec["name"], province=spec["province"], lat=spec["lat"], lng=spec["lng"]
+        )
         db.add(branch)
         await db.flush()
     return branch
