@@ -51,6 +51,19 @@ async def close_day(
     return row
 
 
+async def reopen_day(ctx: TenantContext, business_date: date) -> None:
+    """Undoes close_day — lets an owner who closed by mistake (or fat-
+    fingered "shop closed" instead of the normal-day button) go back to the
+    not-closed state instead of being stuck re-editing a wrong reason."""
+    row = await ctx.db.scalar(ctx.scoped(DailyClose).where(DailyClose.business_date == business_date))
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no close recorded for this date")
+
+    await audit_service.record(ctx, "daily_close.reopen", f"เปิดร้านวันที่ {business_date} (ยกเลิกการปิด)")
+    await ctx.db.delete(row)
+    await ctx.db.commit()
+
+
 async def list_closes(ctx: TenantContext, days: int) -> list[DailyClose]:
     start_date = await today_local(ctx) - timedelta(days=days - 1)
     result = await ctx.db.scalars(

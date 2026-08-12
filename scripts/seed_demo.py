@@ -17,8 +17,10 @@ pipeline is what scripts/seed_branch_demo.py seeds instead (2 applications
 parked mid-review on BKK-CENTRAL), since it's the Branch Champion's own
 demo data, not the shop owner's.
 
-Safe to re-run: if the tenant already has sales, only the insurance policy
-step is (re-)checked; nothing is duplicated.
+Safe to re-run: if the tenant already has sales, it tops up any days
+between the last recorded one and today (keeping the loan streak current —
+see _top_up_recent_days) and re-checks the insurance/loan steps; nothing
+already seeded is duplicated.
 
 Usage — this must run against the SAME database the app is actually serving
 from. The simplest way is to run it inside the backend's own container,
@@ -137,6 +139,66 @@ async def _get_or_create_products(db, tenant: Tenant) -> list[Product]:
     return products
 
 
+async def _seed_normal_day(
+    db, tenant: Tenant, owner: User, products: list[Product], business_date, receipt_seq: int
+) -> tuple[Decimal, int]:
+    """Seeds one ordinary trading day's sales plus its DailyClose(open).
+    Shared by the initial window seed and _top_up_recent_days below so both
+    produce identical-looking days. Returns (day_revenue, updated receipt_seq)."""
+    day_revenue = Decimal("0")
+    for _ in range(random.randint(15, 28)):
+        receipt_seq += 1
+        created_at = datetime.combine(business_date, datetime.min.time(), tzinfo=_TZ).replace(
+            hour=random.randint(9, 20), minute=random.randint(0, 59)
+        )
+        chosen = random.choices(products, k=random.randint(1, 3))
+        payment_method = PaymentMethod.transfer_qr if random.random() < _QR_SHARE else PaymentMethod.cash
+
+        sale_id = uuid.uuid4()
+        subtotal = Decimal("0")
+        items = []
+        for product in chosen:
+            qty = random.randint(1, 3)
+            line_total = product.sell_price * qty
+            subtotal += line_total
+            items.append(
+                SaleItem(
+                    tenant_id=tenant.id,
+                    sale_id=sale_id,
+                    product_id=product.id,
+                    name_snapshot=product.name,
+                    price_snapshot=product.sell_price,
+                    cost_snapshot=product.cost_price,
+                    qty=qty,
+                    line_total=line_total,
+                )
+            )
+
+        db.add(
+            Sale(
+                id=sale_id,
+                tenant_id=tenant.id,
+                receipt_no=f"DEMO-{receipt_seq:05d}",
+                user_id=owner.id,
+                client_uuid=uuid.uuid4(),
+                subtotal=subtotal,
+                discount=Decimal("0"),
+                total=subtotal,
+                payment_method=payment_method,
+                status=SaleStatus.completed,
+                created_at=created_at,
+            )
+        )
+        db.add_all(items)
+        day_revenue += subtotal
+
+    # Closing every normal day too (not just the sick ones) mirrors real
+    # usage — the owner taps "ปิดร้านวันนี้" daily — and is what gets the
+    # streak to a full 30/30 immediately after seeding.
+    db.add(DailyClose(tenant_id=tenant.id, business_date=business_date, closed_reason=DailyCloseReason.open))
+    return day_revenue, receipt_seq
+
+
 async def _seed_sales_and_closes(db, tenant: Tenant, owner: User, products: list[Product]) -> Decimal:
     """Returns the average daily revenue across the non-sick days, used to
     underwrite the seeded insurance policy below with a realistic benefit."""
@@ -159,62 +221,35 @@ async def _seed_sales_and_closes(db, tenant: Tenant, owner: User, products: list
             )
             continue
 
-        day_revenue = Decimal("0")
-        for _ in range(random.randint(15, 28)):
-            receipt_seq += 1
-            created_at = datetime.combine(business_date, datetime.min.time(), tzinfo=_TZ).replace(
-                hour=random.randint(9, 20), minute=random.randint(0, 59)
-            )
-            chosen = random.choices(products, k=random.randint(1, 3))
-            payment_method = PaymentMethod.transfer_qr if random.random() < _QR_SHARE else PaymentMethod.cash
-
-            sale_id = uuid.uuid4()
-            subtotal = Decimal("0")
-            items = []
-            for product in chosen:
-                qty = random.randint(1, 3)
-                line_total = product.sell_price * qty
-                subtotal += line_total
-                items.append(
-                    SaleItem(
-                        tenant_id=tenant.id,
-                        sale_id=sale_id,
-                        product_id=product.id,
-                        name_snapshot=product.name,
-                        price_snapshot=product.sell_price,
-                        cost_snapshot=product.cost_price,
-                        qty=qty,
-                        line_total=line_total,
-                    )
-                )
-
-            db.add(
-                Sale(
-                    id=sale_id,
-                    tenant_id=tenant.id,
-                    receipt_no=f"DEMO-{receipt_seq:05d}",
-                    user_id=owner.id,
-                    client_uuid=uuid.uuid4(),
-                    subtotal=subtotal,
-                    discount=Decimal("0"),
-                    total=subtotal,
-                    payment_method=payment_method,
-                    status=SaleStatus.completed,
-                    created_at=created_at,
-                )
-            )
-            db.add_all(items)
-            day_revenue += subtotal
-
-        # Closing every normal day too (not just the sick ones) mirrors real
-        # usage — the owner taps "ปิดร้านวันนี้" daily — and is what gets the
-        # streak to a full 30/30 immediately after seeding.
-        db.add(DailyClose(tenant_id=tenant.id, business_date=business_date, closed_reason=DailyCloseReason.open))
+        day_revenue, receipt_seq = await _seed_normal_day(db, tenant, owner, products, business_date, receipt_seq)
         total_revenue += day_revenue
         normal_days += 1
 
     tenant.receipt_counter = receipt_seq
     return total_revenue / normal_days if normal_days else Decimal("0")
+
+
+async def _top_up_recent_days(db, tenant: Tenant, owner: User, products: list[Product]) -> None:
+    """The initial seed's streak only runs up to whatever day the script was
+    first run on — every day that passes after that without a real sale
+    breaks it again, which silently re-locks the loan's credit_limit (see
+    income_service.get_income_profile's streak-ending-today calculation)
+    even though nothing about the shop's actual history changed. Re-running
+    this script tops the streak back up to today instead of skipping
+    seeding entirely once any sales exist, so "ยื่นขอสินเชื่อ" stays
+    clickable in the demo no matter how long it's been since the last run."""
+    today = datetime.now(_TZ).date()
+    latest = await db.scalar(select(func.max(DailyClose.business_date)).where(DailyClose.tenant_id == tenant.id))
+    if latest is None or latest >= today:
+        return
+
+    receipt_seq = tenant.receipt_counter
+    gap_days = (today - latest).days
+    for offset in range(1, gap_days + 1):
+        business_date = latest + timedelta(days=offset)
+        _, receipt_seq = await _seed_normal_day(db, tenant, owner, products, business_date, receipt_seq)
+    tenant.receipt_counter = receipt_seq
+    print(f"  เติมยอดขายอีก {gap_days} วัน ({latest + timedelta(days=1)} ถึง {today}) ให้สตรีคต่อเนื่องถึงวันนี้")
 
 
 async def _seed_insurance_policy(db, tenant: Tenant, avg_daily_revenue: Decimal) -> bool:
@@ -349,7 +384,8 @@ async def main() -> None:
             sale_count = 0
 
         if sale_count:
-            print(f"ร้าน '{tenant.name}' มีข้อมูลขายอยู่แล้ว ({sale_count} รายการ) — ข้ามการสร้างยอดขายใหม่")
+            print(f"ร้าน '{tenant.name}' มีข้อมูลขายอยู่แล้ว ({sale_count} รายการ) — เช็คว่าสตรีคถึงวันนี้ไหม")
+            await _top_up_recent_days(db, tenant, owner, products)
             avg_daily_revenue = await db.scalar(
                 select(func.coalesce(func.sum(Sale.total), 0) / _WINDOW_DAYS).where(Sale.tenant_id == tenant.id)
             )

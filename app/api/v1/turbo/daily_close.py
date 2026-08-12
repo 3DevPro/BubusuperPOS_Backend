@@ -1,3 +1,5 @@
+from datetime import date
+
 from fastapi import APIRouter, Depends, Query
 
 from app.core.deps import require
@@ -21,6 +23,14 @@ async def close_day(
     return await daily_close_service.close_day(
         ctx, body.business_date, body.closed_reason, body.extra_expense, body.note
     )
+
+
+@router.delete("/{business_date}", status_code=204)
+async def reopen_day(
+    business_date: date,
+    ctx: TenantContext = Depends(require(Permission.create_sale)),
+) -> None:
+    await daily_close_service.reopen_day(ctx, business_date)
 
 
 @router.get("", response_model=list[DailyCloseResponse])

@@ -13,8 +13,8 @@ class Settings(BaseSettings):
 
     jwt_secret: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 30
-    refresh_token_expire_days: int = 30
+    access_token_expire_minutes: int = 720
+    refresh_token_expire_days: int = 180
 
     # Barcode -> product lookup (name/image/price prefill on product creation).
     # Both providers below are free tiers; upcitemdb_api_key is unused for now
