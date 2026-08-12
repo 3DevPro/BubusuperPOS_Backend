@@ -1,6 +1,7 @@
 import uuid
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy import or_
 
 from app.ai.product_lookup_provider import ProductLookupProvider
@@ -10,6 +11,7 @@ from app.core.tenancy import TenantContext
 from app.models.product import Product
 from app.schemas.product import (
     ProductCreateRequest,
+    ProductImageUploadResponse,
     ProductLookupResponse,
     ProductResponse,
     ProductUpdateRequest,
@@ -17,6 +19,38 @@ from app.schemas.product import (
 from app.services import product_lookup_service, product_service
 
 router = APIRouter(prefix="/products", tags=["products"])
+
+# Served back out via the StaticFiles mount in app/main.py at the same
+# /api/v1/media prefix used to build the URL below.
+_PRODUCT_IMAGE_DIR = Path("media/products")
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+_IMAGE_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+
+
+@router.post("/upload-image", response_model=ProductImageUploadResponse, status_code=status.HTTP_201_CREATED)
+async def upload_product_image(
+    request: Request,
+    file: UploadFile = File(...),
+    ctx: TenantContext = Depends(require(Permission.manage_products)),
+) -> ProductImageUploadResponse:
+    extension = _IMAGE_EXTENSIONS.get(file.content_type or "")
+    if extension is None:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "only jpeg/png/webp images are accepted")
+
+    contents = await file.read()
+    if len(contents) > _MAX_IMAGE_BYTES:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "image must be 5 MB or smaller")
+
+    _PRODUCT_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid.uuid4()}{extension}"
+    (_PRODUCT_IMAGE_DIR / filename).write_bytes(contents)
+
+    # Absolute so it's usable as-is wherever image_url is already stored/
+    # rendered (Image.network needs a full URL, not a path) — relies on
+    # uvicorn's --proxy-headers in prod so this reflects the public domain
+    # rather than the internal backend:8000 address behind Caddy.
+    image_url = f"{str(request.base_url).rstrip('/')}/api/v1/media/products/{filename}"
+    return ProductImageUploadResponse(image_url=image_url)
 
 
 @router.get("", response_model=list[ProductResponse])

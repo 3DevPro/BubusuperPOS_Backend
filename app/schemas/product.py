@@ -31,6 +31,10 @@ class ProductUpdateRequest(BaseModel):
     # POST /inventory/adjust so every change leaves a stock_movements trail.
 
 
+class ProductImageUploadResponse(BaseModel):
+    image_url: str
+
+
 class ProductLookupResponse(BaseModel):
     found: bool
     name: str | None = None

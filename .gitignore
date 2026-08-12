@@ -19,3 +19,7 @@ venv/
 
 # OS
 .DS_Store
+
+# Uploaded product images — dev/local storage only, not source
+media/products/*
+!media/products/.gitkeep
