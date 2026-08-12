@@ -3,18 +3,20 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.branch_scope import BranchContext
 from app.core.security import hash_secret_async
-from app.models.turbo.branch import Branch, Lead, MerchantProspect
+from app.models.turbo.branch import Branch, Lead, MerchantProspect, ProspectContactStatus
 from app.models.user import User, UserRole
 from app.schemas.turbo.branch import (
     BranchSignupRequest,
     LeaderboardEntryResponse,
     LeadRespondRequest,
+    ProspectApplicationInterestUpdateRequest,
+    ProspectContactStatusUpdateRequest,
     NearbyBranchResponse,
     ProspectCreateRequest,
     ProspectVisitRequest,
@@ -85,12 +87,15 @@ async def list_prospects(ctx: BranchContext) -> list[MerchantProspect]:
 
 
 async def create_prospect(ctx: BranchContext, body: ProspectCreateRequest) -> MerchantProspect:
+    # contact_status always starts not_scheduled (the model default) — see
+    # ProspectCreateRequest's comment for why it can't be set here.
     prospect = MerchantProspect(
         branch_id=ctx.branch_id,
         name=body.name,
         business_type=body.business_type,
         address=body.address,
         phone=body.phone,
+        application_interest=body.application_interest,
     )
     ctx.db.add(prospect)
     await ctx.db.commit()
@@ -98,14 +103,68 @@ async def create_prospect(ctx: BranchContext, body: ProspectCreateRequest) -> Me
     return prospect
 
 
-async def visit_prospect(ctx: BranchContext, prospect_id, body: ProspectVisitRequest) -> MerchantProspect:
+async def _get_prospect_or_404(ctx: BranchContext, prospect_id) -> MerchantProspect:
     prospect = await ctx.db.scalar(ctx.scoped(MerchantProspect).where(MerchantProspect.id == prospect_id))
     if prospect is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "prospect not found")
+    return prospect
+
+
+async def visit_prospect(ctx: BranchContext, prospect_id, body: ProspectVisitRequest) -> MerchantProspect:
+    prospect = await _get_prospect_or_404(ctx, prospect_id)
 
     prospect.status = body.status
     prospect.note = body.note
     prospect.last_visited_at = datetime.now(timezone.utc)
+    await ctx.db.commit()
+    await ctx.db.refresh(prospect)
+    return prospect
+
+
+async def delete_prospect(ctx: BranchContext, prospect_id) -> None:
+    prospect = await _get_prospect_or_404(ctx, prospect_id)
+
+    await ctx.db.delete(prospect)
+    try:
+        await ctx.db.commit()
+    except IntegrityError as exc:
+        # A Lead can point back at this prospect (Lead.prospect_id) — no
+        # ON DELETE behavior is set on that FK, so deleting under it would
+        # orphan the lead's history rather than silently detaching it.
+        await ctx.db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "cannot delete a prospect that already has an associated lead"
+        ) from exc
+
+
+async def update_prospect_contact_status(
+    ctx: BranchContext, prospect_id, body: ProspectContactStatusUpdateRequest
+) -> MerchantProspect:
+    # Separate from visit_prospect on purpose — contact history (call/met/
+    # unreachable) is logged the moment a Champion taps it, with no note or
+    # visit-outcome bundled in, unlike the Morning Route visit flow above.
+    prospect = await _get_prospect_or_404(ctx, prospect_id)
+
+    now = datetime.now(timezone.utc)
+    prospect.contact_status = body.contact_status
+    prospect.contact_status_updated_at = now
+    # called_at/met_at only ever move forward, never get cleared by a later
+    # status change — see the model's comment for why (leaderboard history).
+    if body.contact_status == ProspectContactStatus.called:
+        prospect.called_at = now
+    elif body.contact_status == ProspectContactStatus.met:
+        prospect.met_at = now
+    await ctx.db.commit()
+    await ctx.db.refresh(prospect)
+    return prospect
+
+
+async def update_prospect_application_interest(
+    ctx: BranchContext, prospect_id, body: ProspectApplicationInterestUpdateRequest
+) -> MerchantProspect:
+    prospect = await _get_prospect_or_404(ctx, prospect_id)
+
+    prospect.application_interest = body.application_interest
     await ctx.db.commit()
     await ctx.db.refresh(prospect)
     return prospect
@@ -147,9 +206,25 @@ async def leaderboard(ctx: BranchContext) -> list[LeaderboardEntryResponse]:
     tenant-sensitive shop data, just each branch's own activity counts."""
     since = datetime.now(timezone.utc) - _LEADERBOARD_WINDOW
 
+    # A prospect counts as "visited" either through the Morning Route visit
+    # flow (last_visited_at) or by having been marked met (met_at) — the two
+    # are different entry points to the same real-world event, an in-person
+    # visit, so either one alone should count, not both at once. Both use
+    # dedicated timestamps rather than current contact_status, so a prospect
+    # later marked "called" again still counts as visited from having been
+    # met earlier in the window — see the model's comment on called_at/met_at.
     visited_subq = (
         select(MerchantProspect.branch_id, func.count().label("visited"))
-        .where(MerchantProspect.last_visited_at >= since)
+        .where(or_(MerchantProspect.last_visited_at >= since, MerchantProspect.met_at >= since))
+        .group_by(MerchantProspect.branch_id)
+        .subquery()
+    )
+    # Likewise cumulative — a prospect counts as "contacted" if it was ever
+    # called within the window, even if its current status has since moved
+    # on to met/unreachable.
+    prospects_contacted_subq = (
+        select(MerchantProspect.branch_id, func.count().label("contacted"))
+        .where(MerchantProspect.called_at >= since)
         .group_by(MerchantProspect.branch_id)
         .subquery()
     )
@@ -166,9 +241,11 @@ async def leaderboard(ctx: BranchContext) -> list[LeaderboardEntryResponse]:
                 Branch.id,
                 Branch.name,
                 func.coalesce(visited_subq.c.visited, 0),
+                func.coalesce(prospects_contacted_subq.c.contacted, 0),
                 func.coalesce(contacted_subq.c.contacted, 0),
             )
             .outerjoin(visited_subq, visited_subq.c.branch_id == Branch.id)
+            .outerjoin(prospects_contacted_subq, prospects_contacted_subq.c.branch_id == Branch.id)
             .outerjoin(contacted_subq, contacted_subq.c.branch_id == Branch.id)
         )
     ).all()
@@ -178,10 +255,12 @@ async def leaderboard(ctx: BranchContext) -> list[LeaderboardEntryResponse]:
             branch_id=row[0],
             branch_name=row[1],
             prospects_visited=row[2],
-            leads_contacted=row[3],
-            # Weighted so a Champion can't top the board on visits alone —
-            # actually landing a lead (contacted) counts for more.
-            score=row[2] + row[3] * 2,
+            prospects_contacted=row[3],
+            leads_contacted=row[4],
+            # Weighted so a Champion can't top the board on calls alone — an
+            # in-person visit outweighs a call, and actually landing a lead
+            # outweighs both.
+            score=row[2] + row[3] + row[4] * 2,
         )
         for row in rows
     ]

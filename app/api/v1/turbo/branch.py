@@ -17,6 +17,8 @@ from app.schemas.turbo.branch import (
     LeaderboardEntryResponse,
     LeadRespondRequest,
     LeadResponse,
+    ProspectApplicationInterestUpdateRequest,
+    ProspectContactStatusUpdateRequest,
     NearbyBranchResponse,
     ProspectCreateRequest,
     ProspectResponse,
@@ -54,6 +56,25 @@ async def create_prospect(body: ProspectCreateRequest, ctx: CurrentBranch) -> Me
 @router.post("/prospects/{prospect_id}/visit", response_model=ProspectResponse)
 async def visit_prospect(prospect_id: uuid.UUID, body: ProspectVisitRequest, ctx: CurrentBranch) -> MerchantProspect:
     return await branch_service.visit_prospect(ctx, prospect_id, body)
+
+
+@router.post("/prospects/{prospect_id}/contact-status", response_model=ProspectResponse)
+async def update_prospect_contact_status(
+    prospect_id: uuid.UUID, body: ProspectContactStatusUpdateRequest, ctx: CurrentBranch
+) -> MerchantProspect:
+    return await branch_service.update_prospect_contact_status(ctx, prospect_id, body)
+
+
+@router.post("/prospects/{prospect_id}/application-interest", response_model=ProspectResponse)
+async def update_prospect_application_interest(
+    prospect_id: uuid.UUID, body: ProspectApplicationInterestUpdateRequest, ctx: CurrentBranch
+) -> MerchantProspect:
+    return await branch_service.update_prospect_application_interest(ctx, prospect_id, body)
+
+
+@router.delete("/prospects/{prospect_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_prospect(prospect_id: uuid.UUID, ctx: CurrentBranch) -> None:
+    await branch_service.delete_prospect(ctx, prospect_id)
 
 
 @router.get("/leads", response_model=list[LeadResponse])

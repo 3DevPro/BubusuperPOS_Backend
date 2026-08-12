@@ -35,6 +35,20 @@ class MerchantProspectStatus(str, enum.Enum):
     not_interested = "not_interested"
 
 
+class ProspectApplicationInterest(str, enum.Enum):
+    not_applied = "not_applied"
+    applied_loan = "applied_loan"
+    applied_insurance = "applied_insurance"
+    applied_both = "applied_both"
+
+
+class ProspectContactStatus(str, enum.Enum):
+    not_scheduled = "not_scheduled"
+    called = "called"
+    met = "met"
+    unreachable = "unreachable"
+
+
 class MerchantProspect(Base):
     """A shop within a branch's walking radius that isn't a POS tenant —
     who the Champion's Morning Route (see the case's "500-Meter Playbook")
@@ -51,6 +65,21 @@ class MerchantProspect(Base):
     address: Mapped[str | None] = mapped_column(String(500))
     phone: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[MerchantProspectStatus] = mapped_column(default=MerchantProspectStatus.not_visited)
+    application_interest: Mapped[ProspectApplicationInterest] = mapped_column(
+        default=ProspectApplicationInterest.not_applied
+    )
+    contact_status: Mapped[ProspectContactStatus] = mapped_column(default=ProspectContactStatus.not_scheduled)
+    # Timestamp of the last time contact_status changed at all — display-only,
+    # doesn't drive the leaderboard (see called_at/met_at below for that).
+    contact_status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # called_at/met_at track each event independently of contact_status's
+    # current value and of each other, so the leaderboard's "contacted" and
+    # "visited" counts (see branch_service.leaderboard) are a cumulative
+    # history, not a snapshot — calling then later meeting a prospect keeps
+    # both counted, instead of the later status silently erasing the earlier
+    # one the way overwriting a single contact_status would.
+    called_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    met_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     note: Mapped[str | None] = mapped_column(String(500))
     last_visited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -4,7 +4,13 @@ from decimal import Decimal
 
 from pydantic import BaseModel, EmailStr, Field
 
-from app.models.turbo.branch import LeadSource, LeadStatus, MerchantProspectStatus
+from app.models.turbo.branch import (
+    LeadSource,
+    LeadStatus,
+    MerchantProspectStatus,
+    ProspectApplicationInterest,
+    ProspectContactStatus,
+)
 
 
 class BranchSignupRequest(BaseModel):
@@ -46,11 +52,25 @@ class ProspectCreateRequest(BaseModel):
     business_type: str | None = Field(default=None, max_length=100)
     address: str | None = Field(default=None, max_length=500)
     phone: str | None = Field(default=None, max_length=32)
+    application_interest: ProspectApplicationInterest = ProspectApplicationInterest.not_applied
+    # No contact_status here on purpose — a prospect always starts
+    # not_scheduled and can only move to called/met through
+    # update_prospect_contact_status, so the leaderboard's called_at/met_at
+    # timestamps always reflect a real, individually-timestamped action
+    # rather than something backdated at creation time.
 
 
 class ProspectVisitRequest(BaseModel):
     status: MerchantProspectStatus
     note: str | None = Field(default=None, max_length=500)
+
+
+class ProspectContactStatusUpdateRequest(BaseModel):
+    contact_status: ProspectContactStatus
+
+
+class ProspectApplicationInterestUpdateRequest(BaseModel):
+    application_interest: ProspectApplicationInterest
 
 
 class ProspectResponse(BaseModel):
@@ -60,6 +80,11 @@ class ProspectResponse(BaseModel):
     address: str | None
     phone: str | None
     status: MerchantProspectStatus
+    application_interest: ProspectApplicationInterest
+    contact_status: ProspectContactStatus
+    contact_status_updated_at: datetime | None
+    called_at: datetime | None
+    met_at: datetime | None
     note: str | None
     last_visited_at: datetime | None
     created_at: datetime
@@ -95,5 +120,6 @@ class LeaderboardEntryResponse(BaseModel):
     branch_id: uuid.UUID
     branch_name: str
     prospects_visited: int
+    prospects_contacted: int
     leads_contacted: int
     score: int

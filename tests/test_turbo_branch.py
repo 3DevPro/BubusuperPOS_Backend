@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.models.turbo.branch import Lead, LeadSource, MerchantProspect
+from app.models.turbo.branch import Lead, LeadSource, MerchantProspect, ProspectContactStatus
 
 from .conftest import auth_headers, signup
 
@@ -100,6 +100,80 @@ async def test_create_and_list_prospects(client):
     assert listed.json()[0]["name"] == "ร้านส้มตำป้าแดง"
 
 
+async def test_create_prospect_ignores_contact_status_in_the_request(client):
+    """A prospect always starts not_scheduled regardless of what's sent — see
+    ProspectCreateRequest's comment. Letting the caller set called/met at
+    creation would let the leaderboard be gamed with backdated activity."""
+    tokens = await _branch_signup(client, "BKK-024", "champion-y@example.com")
+    headers = auth_headers(tokens)
+
+    resp = await client.post(
+        "/api/v1/turbo/branch/prospects",
+        json={"name": "ร้านลัด", "contact_status": "met"},
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["contact_status"] == "not_scheduled"
+    assert body["called_at"] is None
+    assert body["met_at"] is None
+    assert body["contact_status_updated_at"] is None
+
+
+async def test_update_prospect_application_interest(client):
+    tokens = await _branch_signup(client, "BKK-025", "champion-z@example.com")
+    headers = auth_headers(tokens)
+    prospect = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านผลไม้"}, headers=headers)
+    ).json()
+    assert prospect["application_interest"] == "not_applied"
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/application-interest",
+        json={"application_interest": "applied_both"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["application_interest"] == "applied_both"
+
+
+async def test_update_prospect_application_interest_from_other_branch_is_404(client):
+    tokens_a = await _branch_signup(client, "BKK-026", "champion-aa@example.com")
+    tokens_b = await _branch_signup(client, "BKK-027", "champion-bb@example.com")
+
+    prospect = (
+        await client.post(
+            "/api/v1/turbo/branch/prospects", json={"name": "ร้าน A"}, headers=auth_headers(tokens_a)
+        )
+    ).json()
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/application-interest",
+        json={"application_interest": "applied_loan"},
+        headers=auth_headers(tokens_b),
+    )
+    assert resp.status_code == 404
+
+
+async def test_leaderboard_score_includes_prospects_contacted(client):
+    tokens = await _branch_signup(client, "BKK-028", "champion-cc@example.com")
+    headers = auth_headers(tokens)
+    prospect = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านโทร"}, headers=headers)
+    ).json()
+    await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/contact-status",
+        json={"contact_status": "called"},
+        headers=headers,
+    )
+
+    me = (await client.get("/api/v1/auth/me", headers=headers)).json()
+    resp = await client.get("/api/v1/turbo/branch/leaderboard", headers=headers)
+    row = next(r for r in resp.json() if r["branch_id"] == me["branch_id"])
+    assert row["prospects_contacted"] == 1
+    assert row["score"] == 1
+
+
 async def test_visit_prospect_updates_status_and_timestamp(client):
     tokens = await _branch_signup(client, "BKK-006", "champion-g@example.com")
     headers = auth_headers(tokens)
@@ -148,7 +222,74 @@ async def test_visit_prospect_from_other_branch_is_404(client):
     assert resp.status_code == 404
 
 
-async def _insert_lead(engine, branch_id, name="สนใจแล้ว"):
+async def test_update_prospect_contact_status(client):
+    tokens = await _branch_signup(client, "BKK-015", "champion-p@example.com")
+    headers = auth_headers(tokens)
+    prospect = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านผลไม้"}, headers=headers)
+    ).json()
+    assert prospect["contact_status"] == "not_scheduled"
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/contact-status",
+        json={"contact_status": "called"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["contact_status"] == "called"
+    # Untouched by this call — contact_status is independent of the visit flow.
+    assert resp.json()["status"] == "not_visited"
+
+
+async def test_update_prospect_contact_status_from_other_branch_is_404(client):
+    tokens_a = await _branch_signup(client, "BKK-016", "champion-q@example.com")
+    tokens_b = await _branch_signup(client, "BKK-017", "champion-r@example.com")
+
+    prospect = (
+        await client.post(
+            "/api/v1/turbo/branch/prospects", json={"name": "ร้าน A"}, headers=auth_headers(tokens_a)
+        )
+    ).json()
+
+    resp = await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/contact-status",
+        json={"contact_status": "called"},
+        headers=auth_headers(tokens_b),
+    )
+    assert resp.status_code == 404
+
+
+async def test_delete_prospect_removes_it(client):
+    tokens = await _branch_signup(client, "BKK-018", "champion-s@example.com")
+    headers = auth_headers(tokens)
+    prospect = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านผลไม้"}, headers=headers)
+    ).json()
+
+    resp = await client.delete(f"/api/v1/turbo/branch/prospects/{prospect['id']}", headers=headers)
+    assert resp.status_code == 204, resp.text
+
+    listed = await client.get("/api/v1/turbo/branch/prospects", headers=headers)
+    assert listed.json() == []
+
+
+async def test_delete_prospect_from_other_branch_is_404(client):
+    tokens_a = await _branch_signup(client, "BKK-019", "champion-t@example.com")
+    tokens_b = await _branch_signup(client, "BKK-020", "champion-u@example.com")
+
+    prospect = (
+        await client.post(
+            "/api/v1/turbo/branch/prospects", json={"name": "ร้าน A"}, headers=auth_headers(tokens_a)
+        )
+    ).json()
+
+    resp = await client.delete(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}", headers=auth_headers(tokens_b)
+    )
+    assert resp.status_code == 404
+
+
+async def _insert_lead(engine, branch_id, name="สนใจแล้ว", prospect_id=None):
     session_factory = async_sessionmaker(engine)
     lead_id = uuid.uuid4()
     async with session_factory() as session:
@@ -156,6 +297,7 @@ async def _insert_lead(engine, branch_id, name="สนใจแล้ว"):
             Lead(
                 id=lead_id,
                 assigned_branch_id=branch_id,
+                prospect_id=prospect_id,
                 source=LeadSource.o2o_web,
                 name=name,
                 occupation="แม่ค้า",
@@ -164,6 +306,23 @@ async def _insert_lead(engine, branch_id, name="สนใจแล้ว"):
         )
         await session.commit()
     return lead_id
+
+
+async def test_delete_prospect_with_associated_lead_is_409(client, engine):
+    tokens = await _branch_signup(client, "BKK-021", "champion-v@example.com")
+    headers = auth_headers(tokens)
+    me = (await client.get("/api/v1/auth/me", headers=headers)).json()
+    prospect = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านผลไม้"}, headers=headers)
+    ).json()
+
+    await _insert_lead(engine, me["branch_id"], prospect_id=uuid.UUID(prospect["id"]))
+
+    resp = await client.delete(f"/api/v1/turbo/branch/prospects/{prospect['id']}", headers=headers)
+    assert resp.status_code == 409
+
+    listed = await client.get("/api/v1/turbo/branch/prospects", headers=headers)
+    assert len(listed.json()) == 1
 
 
 async def test_respond_to_lead_sets_first_response_once(client, engine):
@@ -223,6 +382,74 @@ async def test_leaderboard_ranks_branches_by_score(client, engine):
     assert scores == sorted(scores, reverse=True)
 
 
+async def test_leaderboard_maps_called_to_contacted_and_met_to_visited(client):
+    tokens = await _branch_signup(client, "BKK-022", "champion-w@example.com")
+    headers = auth_headers(tokens)
+
+    called = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านโทร"}, headers=headers)
+    ).json()
+    await client.post(
+        f"/api/v1/turbo/branch/prospects/{called['id']}/contact-status",
+        json={"contact_status": "called"},
+        headers=headers,
+    )
+    met = (await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านนัดพบ"}, headers=headers)).json()
+    await client.post(
+        f"/api/v1/turbo/branch/prospects/{met['id']}/contact-status",
+        json={"contact_status": "met"},
+        headers=headers,
+    )
+    # Not contacted yet, and explicitly unreachable — neither should count.
+    await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านยังไม่ติดต่อ"}, headers=headers)
+    unreachable = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านติดต่อไม่ได้"}, headers=headers)
+    ).json()
+    await client.post(
+        f"/api/v1/turbo/branch/prospects/{unreachable['id']}/contact-status",
+        json={"contact_status": "unreachable"},
+        headers=headers,
+    )
+
+    me = (await client.get("/api/v1/auth/me", headers=headers)).json()
+    resp = await client.get("/api/v1/turbo/branch/leaderboard", headers=headers)
+    row = next(r for r in resp.json() if r["branch_id"] == me["branch_id"])
+    # Called counts as "contacted"; met counts as "visited" instead, not both.
+    assert row["prospects_contacted"] == 1
+    assert row["prospects_visited"] == 1
+
+
+async def test_leaderboard_counts_are_cumulative_not_a_status_snapshot(client):
+    """Changing a prospect's contact_status must not erase counts it already
+    earned — called_at/met_at each persist independently once set (see the
+    model's comment), unlike contact_status itself which only holds the
+    latest value."""
+    tokens = await _branch_signup(client, "BKK-023", "champion-x@example.com")
+    headers = auth_headers(tokens)
+
+    prospect = (
+        await client.post("/api/v1/turbo/branch/prospects", json={"name": "ร้านทดสอบ"}, headers=headers)
+    ).json()
+    await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/contact-status",
+        json={"contact_status": "called"},
+        headers=headers,
+    )
+    # Now mark the same prospect met — current contact_status moves on, but
+    # the earlier call should still count.
+    await client.post(
+        f"/api/v1/turbo/branch/prospects/{prospect['id']}/contact-status",
+        json={"contact_status": "met"},
+        headers=headers,
+    )
+
+    me = (await client.get("/api/v1/auth/me", headers=headers)).json()
+    resp = await client.get("/api/v1/turbo/branch/leaderboard", headers=headers)
+    row = next(r for r in resp.json() if r["branch_id"] == me["branch_id"])
+    assert row["prospects_contacted"] == 1
+    assert row["prospects_visited"] == 1
+
+
 async def test_leaderboard_ignores_activity_outside_the_7_day_window(client, engine):
     tokens = await _branch_signup(client, "BKK-014", "champion-o@example.com")
     me = (await client.get("/api/v1/auth/me", headers=auth_headers(tokens))).json()
@@ -234,6 +461,9 @@ async def test_leaderboard_ignores_activity_outside_the_7_day_window(client, eng
                 branch_id=me["branch_id"],
                 name="ร้านเก่า",
                 last_visited_at=datetime.now(timezone.utc) - timedelta(days=30),
+                contact_status=ProspectContactStatus.met,
+                contact_status_updated_at=datetime.now(timezone.utc) - timedelta(days=30),
+                met_at=datetime.now(timezone.utc) - timedelta(days=30),
             )
         )
         await session.commit()
@@ -241,6 +471,7 @@ async def test_leaderboard_ignores_activity_outside_the_7_day_window(client, eng
     resp = await client.get("/api/v1/turbo/branch/leaderboard", headers=auth_headers(tokens))
     row = next(r for r in resp.json() if r["branch_id"] == me["branch_id"])
     assert row["prospects_visited"] == 0
+    assert row["prospects_contacted"] == 0
 
 
 async def test_nearby_branches_are_sorted_by_distance(client):
