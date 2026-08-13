@@ -38,6 +38,13 @@ class ProductImageUploadResponse(BaseModel):
     image_url: str
 
 
+class AssignBarcodesRequest(BaseModel):
+    # Explicit product_ids takes precedence when both are given; all_missing
+    # is the "generate for everything that doesn't have one yet" bulk action.
+    product_ids: list[uuid.UUID] = Field(default_factory=list)
+    all_missing: bool = False
+
+
 class ProductLookupResponse(BaseModel):
     found: bool
     name: str | None = None

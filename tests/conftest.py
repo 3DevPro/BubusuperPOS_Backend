@@ -2,6 +2,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core import db as core_db
 from app.core.db import Base, get_db
 from app.core.rate_limit import reset_all as reset_rate_limits
 from app.main import app
@@ -35,10 +36,20 @@ async def client(engine):
             yield session
 
     app.dependency_overrides[get_db] = override_get_db
+
+    # get_session_factory() isn't reached through FastAPI's DI (background
+    # jobs call it as a plain function, see app/jobs/scheduler.py), so
+    # dependency_overrides can't redirect it — monkeypatch the module
+    # attribute directly instead, and restore it so other tests aren't
+    # left pointed at a disposed engine.
+    original_get_session_factory = core_db.get_session_factory
+    core_db.get_session_factory = lambda: session_factory
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
+    core_db.get_session_factory = original_get_session_factory
 
 
 async def signup(client, business_name, owner_name, email, password="Password123!"):

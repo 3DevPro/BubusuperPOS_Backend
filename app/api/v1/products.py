@@ -10,13 +10,14 @@ from app.core.permissions import Permission
 from app.core.tenancy import TenantContext
 from app.models.product import Product
 from app.schemas.product import (
+    AssignBarcodesRequest,
     ProductCreateRequest,
     ProductImageUploadResponse,
     ProductLookupResponse,
     ProductResponse,
     ProductUpdateRequest,
 )
-from app.services import product_lookup_service, product_service
+from app.services import barcode_service, product_lookup_service, product_service
 
 router = APIRouter(prefix="/products", tags=["products"])
 
@@ -57,6 +58,7 @@ async def upload_product_image(
 async def list_products(
     q: str | None = None,
     include_inactive: bool = False,
+    has_barcode: bool | None = None,
     limit: int | None = Query(default=None, ge=1, le=50),
     ctx: TenantContext = Depends(require(Permission.view_products)),
 ) -> list[Product]:
@@ -68,11 +70,29 @@ async def list_products(
         query = query.where(
             or_(Product.name.ilike(pattern), Product.sku.ilike(pattern), Product.barcode.ilike(pattern))
         )
+    if has_barcode is not None:
+        query = query.where(Product.barcode.is_not(None) if has_barcode else Product.barcode.is_(None))
     query = query.order_by(Product.name)
     if limit is not None:
         query = query.limit(limit)
     result = await ctx.db.scalars(query)
     return list(result)
+
+
+@router.get("/by-barcode/{barcode}", response_model=ProductResponse)
+async def get_product_by_barcode(
+    barcode: str,
+    ctx: TenantContext = Depends(require(Permission.view_products)),
+) -> Product:
+    # Exact match on the (tenant_id, barcode) unique index — the fast,
+    # unambiguous path a barcode scan should use instead of the ILIKE scan
+    # `list_products(q=...)` does for free-text search.
+    product = await ctx.db.scalar(
+        ctx.scoped(Product).where(Product.barcode == barcode, Product.is_active.is_(True))
+    )
+    if product is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "product not found")
+    return product
 
 
 @router.get("/lookup/{barcode}", response_model=ProductLookupResponse)
@@ -101,6 +121,29 @@ async def create_product(
     ctx: TenantContext = Depends(require(Permission.manage_products)),
 ) -> Product:
     return await product_service.create_product(ctx, body)
+
+
+@router.post("/assign-barcodes", response_model=list[ProductResponse])
+async def assign_barcodes(
+    body: AssignBarcodesRequest,
+    ctx: TenantContext = Depends(require(Permission.manage_products)),
+) -> list[Product]:
+    if body.all_missing:
+        missing = await ctx.db.scalars(
+            ctx.scoped(Product).where(Product.barcode.is_(None), Product.is_active.is_(True))
+        )
+        product_ids = [p.id for p in missing]
+    else:
+        product_ids = body.product_ids
+    return await barcode_service.assign_barcodes_bulk(ctx, product_ids)
+
+
+@router.post("/{product_id}/barcode", response_model=ProductResponse)
+async def assign_barcode(
+    product_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(Permission.manage_products)),
+) -> Product:
+    return await barcode_service.assign_barcode(ctx, product_id)
 
 
 @router.patch("/{product_id}", response_model=ProductResponse)

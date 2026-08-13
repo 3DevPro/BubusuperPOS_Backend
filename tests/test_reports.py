@@ -36,6 +36,33 @@ async def test_report_summary_matches_actual_sales(client):
     assert body["item_count"] == 2
 
 
+async def test_report_summary_profit_accounts_for_line_discount(client):
+    # A per-item discount must reduce reported profit — the raw
+    # (price - cost) * qty formula this replaced ignored discount entirely
+    # and would have reported the pre-discount margin here.
+    tokens = await signup(client, "Shop A2", "Owner A2", "report-a2@example.com")
+    headers = auth_headers(tokens)
+    product = await create_product(
+        client, headers, "กาแฟ", sell_price="45.00", cost_price="20.00", stock_qty=100
+    )
+
+    resp = await client.post(
+        "/api/v1/sales",
+        json={
+            "client_uuid": str(uuid.uuid4()),
+            "items": [{"product_id": product["id"], "qty": 1, "discount": "10.00"}],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+
+    resp = await client.get("/api/v1/reports/summary?period=today", headers=headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["revenue"] == "35.00"
+    assert body["profit"] == "15.00"  # (45 - 10) - 20
+
+
 async def test_today_boundary_uses_tenant_timezone_not_utc(client, engine):
     # A sale at 01:00 Bangkok time is 18:00 UTC the *previous* calendar day.
     # If the report boundary used naive UTC dates instead of the tenant's

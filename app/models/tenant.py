@@ -25,9 +25,22 @@ class Tenant(Base):
     # Same gap-free-numbering rationale as receipt_counter, for purchase
     # orders instead of sales.
     po_counter: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Same gap-free-numbering rationale as receipt_counter, for in-store
+    # EAN-13 barcodes generated for products that don't have a manufacturer
+    # barcode (see app/services/barcode_service.py).
+    internal_barcode_counter: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Thai mobile number (10 digits) or citizen/tax ID (13 digits) used to
     # build PromptPay QR payloads at checkout. Null until the owner sets it.
     promptpay_id: Mapped[str | None] = mapped_column(String(20))
+    # Abbreviated tax invoice (ใบกำกับภาษีอย่างย่อ) fields — all null until
+    # the owner fills them in from Settings; the receipt renders the plain
+    # (non-tax-invoice) layout until tax_id is set, even if VAT is enabled.
+    tax_id: Mapped[str | None] = mapped_column(String(13))
+    address: Mapped[str | None] = mapped_column(String(500))
+    # Branch number for the tax invoice header — "00000" means สำนักงานใหญ่
+    # (head office); left null for a single-branch shop that hasn't set one.
+    branch_code: Mapped[str | None] = mapped_column(String(10))
+    receipt_footer: Mapped[str | None] = mapped_column(String(500))
     # VAT settings — off by default so existing tenants see zero change in
     # totals until the owner explicitly opts in from Settings. vat_enabled is
     # kept separate from vat_rate so VAT can be toggled off without losing

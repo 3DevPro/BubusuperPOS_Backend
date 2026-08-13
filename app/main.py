@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -6,8 +7,19 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.jobs import scheduler
 
-app = FastAPI(title="Loyverse Clone API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if settings.scheduler_enabled:
+        scheduler.start()
+    yield
+    if settings.scheduler_enabled:
+        scheduler.shutdown()
+
+
+app = FastAPI(title="Loyverse Clone API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

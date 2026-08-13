@@ -1,5 +1,16 @@
 from app.models.audit_log import AuditLog
 from app.models.customer import Customer
+from app.models.notification import (
+    DeliveryStatus,
+    LineLinkToken,
+    LineRecipient,
+    LowStockAlertState,
+    Notification,
+    NotificationChannelName,
+    NotificationDelivery,
+    NotificationKind,
+    NotificationSettings,
+)
 from app.models.product import BarcodeLookupCache, Category, Product
 from app.models.purchase_order import PurchaseOrder, PurchaseOrderItem, PurchaseOrderStatus
 from app.models.refund import Refund, RefundItem
@@ -79,4 +90,13 @@ __all__ = [
     "LoanAccountStatus",
     "LoanInstallment",
     "LoanInstallmentStatus",
+    "Notification",
+    "NotificationKind",
+    "NotificationChannelName",
+    "NotificationSettings",
+    "NotificationDelivery",
+    "DeliveryStatus",
+    "LowStockAlertState",
+    "LineLinkToken",
+    "LineRecipient",
 ]

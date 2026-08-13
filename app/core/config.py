@@ -33,6 +33,25 @@ class Settings(BaseSettings):
     # browser preflights every request. Override via env for the prod domain.
     cors_allow_origin_regex: str = r"http://localhost:\d+"
 
+    # In-process APScheduler for low-stock/daily-summary notification sweeps
+    # (see app/jobs/scheduler.py) — off by default anywhere that shouldn't
+    # run background jobs against a shared DB (e.g. a one-off script that
+    # imports app.main).
+    scheduler_enabled: bool = True
+
+    # LINE Messaging API push channel for notifications (see
+    # app/services/line_service.py). Blank by default — a tenant can turn
+    # on line_enabled in their own notification settings, but nothing is
+    # actually sent until these are configured, since there's no LINE OA
+    # without them. See BubusuperPOS_Infra/README.md for the console setup
+    # steps (create a Messaging API channel, issue a long-lived access
+    # token, point its webhook at /api/v1/notifications/line/webhook).
+    line_channel_secret: str = ""
+    line_channel_access_token: str = ""
+    # The OA's public "@xxxxxxx" handle, used to build the add-friend URL
+    # shown to the owner during account linking.
+    line_oa_basic_id: str = ""
+
     @field_validator("jwt_secret")
     @classmethod
     def _jwt_secret_is_usable(cls, value: str) -> str:

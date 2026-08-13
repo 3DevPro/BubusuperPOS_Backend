@@ -110,9 +110,14 @@ async def get_summary(
     profit, item_count = (
         await ctx.db.execute(
             select(
-                func.coalesce(
-                    func.sum((SaleItem.price_snapshot - SaleItem.cost_snapshot) * _REMAINING_QTY), 0
-                ),
+                # Revenue side must be _REMAINING_LINE_TOTAL, not
+                # price_snapshot * qty — otherwise a cashier's per-item
+                # discount (or a promotion discount) is invisible to profit
+                # and a free/heavily-discounted line reports full margin.
+                # round() to 2dp because _REMAINING_LINE_TOTAL divides by
+                # qty, which Postgres NUMERIC division widens to many extra
+                # decimal digits even though money is always 2dp.
+                func.coalesce(func.round(func.sum(_REMAINING_LINE_TOTAL - SaleItem.cost_snapshot * _REMAINING_QTY), 2), 0),
                 func.coalesce(func.sum(_REMAINING_QTY), 0),
             )
             .join(Sale, Sale.id == SaleItem.sale_id)

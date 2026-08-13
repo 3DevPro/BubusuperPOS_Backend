@@ -7,6 +7,7 @@ from app.api.v1 import (
     customers,
     health,
     inventory,
+    notifications,
     products,
     purchase_orders,
     reports,
@@ -31,4 +32,5 @@ api_router.include_router(reports.router)
 api_router.include_router(tenant.router)
 api_router.include_router(suppliers.router)
 api_router.include_router(purchase_orders.router)
+api_router.include_router(notifications.router)
 api_router.include_router(turbo_router)
