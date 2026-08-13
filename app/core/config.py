@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     # later without touching the provider class, only this setting.
     product_lookup_timeout_seconds: int = 8
     product_lookup_cache_days: int = 30
+    # Short-lived: a "not found" is often just a daily provider quota (e.g.
+    # UPCitemdb's ~100/day trial limit) hit at the wrong moment, not a real
+    # miss — cache it briefly so the same barcode gets retried tomorrow
+    # instead of staying "not found" for a full product_lookup_cache_days.
+    product_lookup_negative_cache_days: int = 1
     upcitemdb_api_key: str = ""
 
     # Flutter web runs on a different origin/port than the API in dev, so the
