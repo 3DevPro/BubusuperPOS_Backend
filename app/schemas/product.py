@@ -1,4 +1,5 @@
 import uuid
+from datetime import date
 from decimal import Decimal
 
 from pydantic import BaseModel, Field
@@ -15,6 +16,7 @@ class ProductCreateRequest(BaseModel):
     track_stock: bool = True
     stock_qty: int = Field(default=0, ge=0)
     low_stock_threshold: int = Field(default=5, ge=0)
+    expiry_date: date | None = None
 
 
 class ProductUpdateRequest(BaseModel):
@@ -27,6 +29,7 @@ class ProductUpdateRequest(BaseModel):
     cost_price: Decimal | None = Field(default=None, ge=0)
     track_stock: bool | None = None
     low_stock_threshold: int | None = Field(default=None, ge=0)
+    expiry_date: date | None = None
     # stock_qty is deliberately not editable here — go through
     # POST /inventory/adjust so every change leaves a stock_movements trail.
 
@@ -58,6 +61,7 @@ class ProductResponse(BaseModel):
     track_stock: bool
     stock_qty: int
     low_stock_threshold: int
+    expiry_date: date | None
     is_active: bool
 
     model_config = {"from_attributes": True}

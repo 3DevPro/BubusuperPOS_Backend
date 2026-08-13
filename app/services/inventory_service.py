@@ -1,3 +1,5 @@
+from datetime import date, timedelta
+
 from fastapi import HTTPException, status
 from sqlalchemy import update
 
@@ -46,5 +48,23 @@ async def list_low_stock(ctx: TenantContext) -> list[Product]:
             Product.is_active.is_(True),
             Product.stock_qty <= Product.low_stock_threshold,
         )
+    )
+    return list(result)
+
+
+async def list_expiring_soon(ctx: TenantContext, days: int = 7) -> list[Product]:
+    """Includes anything already past its expiry_date too, not just what's
+    coming up — an expired item still sitting in stock needs pulling off the
+    shelf even more urgently than one that's merely close."""
+    cutoff = date.today() + timedelta(days=days)
+    result = await ctx.db.scalars(
+        ctx.scoped(Product)
+        .where(
+            Product.is_active.is_(True),
+            Product.stock_qty > 0,
+            Product.expiry_date.is_not(None),
+            Product.expiry_date <= cutoff,
+        )
+        .order_by(Product.expiry_date)
     )
     return list(result)

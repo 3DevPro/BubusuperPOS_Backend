@@ -1,8 +1,8 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -33,6 +33,7 @@ class Product(TenantScopedMixin, Base):
     track_stock: Mapped[bool] = mapped_column(Boolean, default=True)
     stock_qty: Mapped[int] = mapped_column(Integer, default=0)
     low_stock_threshold: Mapped[int] = mapped_column(Integer, default=5)
+    expiry_date: Mapped[date | None] = mapped_column(Date)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

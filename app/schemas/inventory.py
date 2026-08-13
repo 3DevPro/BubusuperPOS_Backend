@@ -1,4 +1,5 @@
 import uuid
+from datetime import date
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -36,5 +37,14 @@ class LowStockItem(BaseModel):
     name: str
     stock_qty: int
     low_stock_threshold: int
+
+    model_config = {"from_attributes": True}
+
+
+class ExpiringSoonItem(BaseModel):
+    id: uuid.UUID
+    name: str
+    stock_qty: int
+    expiry_date: date
 
     model_config = {"from_attributes": True}
