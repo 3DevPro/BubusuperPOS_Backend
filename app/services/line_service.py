@@ -82,6 +82,30 @@ async def unlink(ctx: TenantContext, recipient_id: uuid.UUID) -> None:
         await ctx.db.commit()
 
 
+def _looks_like_link_code(text: str) -> bool:
+    return len(text) == _TOKEN_LENGTH and all(c in _TOKEN_ALPHABET for c in text)
+
+
+async def _linked_tenant(db: AsyncSession, line_user_id: str) -> Tenant | None:
+    recipient = await db.scalar(
+        select(LineRecipient).where(LineRecipient.line_user_id == line_user_id, LineRecipient.is_active.is_(True))
+    )
+    if recipient is None:
+        return None
+    return await db.get(Tenant, recipient.tenant_id)
+
+
+async def _help_message(db: AsyncSession, line_user_id: str) -> str:
+    tenant = await _linked_tenant(db, line_user_id)
+    if tenant is not None:
+        return (
+            f"สวัสดีค่ะ 🙂 บัญชีนี้เชื่อมต่อกับร้าน {tenant.name} อยู่แล้ว "
+            "จะแจ้งเตือนสต๊อกใกล้หมดและสรุปยอดขายให้ค่ะ "
+            "ถ้าต้องการยกเลิกการเชื่อมต่อ ไปที่หน้าตั้งค่าในแอปได้เลยค่ะ"
+        )
+    return "พิมพ์รหัส 6 หลักจากหน้าตั้งค่าในแอปเพื่อเชื่อมต่อร้านของคุณ"
+
+
 async def _consume_link_token(db: AsyncSession, code: str, line_user_id: str) -> Tenant | None:
     now = datetime.now(timezone.utc)
     token = await db.scalar(
@@ -131,16 +155,23 @@ async def _handle_event(db: AsyncSession, event: dict) -> None:
 
     if event_type == "message" and (event.get("message") or {}).get("type") == "text" and line_user_id:
         code = event["message"]["text"].strip().upper()
-        tenant = await _consume_link_token(db, code, line_user_id)
-        if tenant is not None:
-            if reply_token:
-                await reply_message(reply_token, f"เชื่อมต่อร้าน {tenant.name} เรียบร้อยแล้ว ✅")
+        if _looks_like_link_code(code):
+            tenant = await _consume_link_token(db, code, line_user_id)
+            if tenant is not None:
+                if reply_token:
+                    await reply_message(reply_token, f"เชื่อมต่อร้าน {tenant.name} เรียบร้อยแล้ว ✅")
+            elif reply_token:
+                await reply_message(reply_token, "รหัสไม่ถูกต้องหรือหมดอายุ กรุณาขอรหัสใหม่จากหน้าตั้งค่าในแอป")
         elif reply_token:
-            await reply_message(reply_token, "รหัสไม่ถูกต้องหรือหมดอายุ กรุณาขอรหัสใหม่จากหน้าตั้งค่าในแอป")
+            # Not code-shaped — the sender is chatting rather than pasting a
+            # link code, so answer with connection status instead of the
+            # generic "invalid code" reply that used to fire for every
+            # message, including plain greetings.
+            await reply_message(reply_token, await _help_message(db, line_user_id))
         return
 
     if event_type == "follow" and reply_token:
-        await reply_message(reply_token, "ยินดีต้อนรับ! พิมพ์รหัส 6 หลักจากหน้าตั้งค่าในแอปเพื่อเชื่อมต่อร้านของคุณ")
+        await reply_message(reply_token, await _help_message(db, line_user_id))
         return
 
     if event_type == "unfollow" and line_user_id:
