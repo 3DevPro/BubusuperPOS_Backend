@@ -50,6 +50,14 @@ from app.services.turbo.daily_close_service import today_local
 
 _CENTS = Decimal("0.01")
 
+# disburse() can trip a uniqueness constraint at two different points (the
+# flush that inserts the account, and the final commit), and both mean the
+# same thing to the caller, so the message lives here instead of being
+# written out twice.
+_DISBURSE_CONFLICT_MESSAGE = (
+    "มีบัญชีสินเชื่อที่ใช้งานอยู่แล้ว หรือสินเชื่อนี้เบิกจ่ายไปแล้ว ไม่สามารถเบิกจ่ายซ้ำได้"
+)
+
 # A plain dict, not a state-machine class/library — nothing else in this
 # project uses that kind of abstraction, and one guard clause per transition
 # is all this needs. approved/rejected/disbursed have no outgoing review
@@ -521,7 +529,15 @@ async def disburse(ctx: TenantContext, application_id: uuid.UUID) -> LoanAccount
         first_due_date=first_due_date,
     )
     ctx.db.add(account)
-    await ctx.db.flush()
+    try:
+        await ctx.db.flush()
+    except IntegrityError:
+        # Two disburse calls racing on *different* applications of the same
+        # tenant both read the same value out of _next_account_number(), so
+        # the loser violates turbo_loan_accounts_account_number_key right
+        # here — the commit() backstop below is 35 lines too late to catch it.
+        await ctx.db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, _DISBURSE_CONFLICT_MESSAGE)
 
     schedule = build_schedule(
         application.approved_amount, application.monthly_interest_rate_snapshot, application.term_months, first_due_date
@@ -565,10 +581,7 @@ async def disburse(ctx: TenantContext, application_id: uuid.UUID) -> LoanAccount
         # concurrent calls for the *same* application; this catches two
         # different applications for the same tenant racing each other.
         await ctx.db.rollback()
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "มีบัญชีสินเชื่อที่ใช้งานอยู่แล้ว หรือสินเชื่อนี้เบิกจ่ายไปแล้ว ไม่สามารถเบิกจ่ายซ้ำได้",
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, _DISBURSE_CONFLICT_MESSAGE)
     await ctx.db.refresh(account)
     return account
 
