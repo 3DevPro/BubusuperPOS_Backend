@@ -25,7 +25,6 @@ class NotificationSettingsResponse(BaseModel):
     daily_summary_time: time
     quiet_hours_start: time | None
     quiet_hours_end: time | None
-    line_enabled: bool
 
     model_config = {"from_attributes": True}
 
@@ -41,19 +40,3 @@ class NotificationSettingsUpdateRequest(BaseModel):
     # Accept None explicitly to allow clearing a previously-set quiet-hours window.
     quiet_hours_start: time | None = Field(default=None)
     quiet_hours_end: time | None = Field(default=None)
-    line_enabled: bool | None = None
-
-
-class LineLinkTokenResponse(BaseModel):
-    token: str
-    oa_add_friend_url: str
-    expires_at: datetime
-
-
-class LineRecipientResponse(BaseModel):
-    id: uuid.UUID
-    display_name: str | None
-    is_active: bool
-    linked_at: datetime
-
-    model_config = {"from_attributes": True}

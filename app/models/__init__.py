@@ -2,8 +2,6 @@ from app.models.audit_log import AuditLog
 from app.models.customer import Customer
 from app.models.notification import (
     DeliveryStatus,
-    LineLinkToken,
-    LineRecipient,
     LowStockAlertState,
     Notification,
     NotificationChannelName,
@@ -97,6 +95,4 @@ __all__ = [
     "NotificationDelivery",
     "DeliveryStatus",
     "LowStockAlertState",
-    "LineLinkToken",
-    "LineRecipient",
 ]

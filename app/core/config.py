@@ -39,19 +39,6 @@ class Settings(BaseSettings):
     # imports app.main).
     scheduler_enabled: bool = True
 
-    # LINE Messaging API push channel for notifications (see
-    # app/services/line_service.py). Blank by default — a tenant can turn
-    # on line_enabled in their own notification settings, but nothing is
-    # actually sent until these are configured, since there's no LINE OA
-    # without them. See BubusuperPOS_Infra/README.md for the console setup
-    # steps (create a Messaging API channel, issue a long-lived access
-    # token, point its webhook at /api/v1/notifications/line/webhook).
-    line_channel_secret: str = ""
-    line_channel_access_token: str = ""
-    # The OA's public "@xxxxxxx" handle, used to build the add-friend URL
-    # shown to the owner during account linking.
-    line_oa_basic_id: str = ""
-
     @field_validator("jwt_secret")
     @classmethod
     def _jwt_secret_is_usable(cls, value: str) -> str:
