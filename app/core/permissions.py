@@ -26,6 +26,11 @@ class Permission(str, enum.Enum):
     # back-office rationale as manage_insurance: a financial commitment on
     # the tenant's behalf, not a cashier-level action.
     manage_loans = "manage_loans"
+    # Creating/editing discount rules affects every future sale's margin —
+    # back-office like manage_products, not a cashier-level action. A
+    # cashier still benefits from promotions automatically at checkout via
+    # create_sale; they just can't define the rules.
+    manage_promotions = "manage_promotions"
 
 
 ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
@@ -41,6 +46,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.manage_customers,
         Permission.manage_insurance,
         Permission.manage_loans,
+        Permission.manage_promotions,
     },
     UserRole.cashier: {
         Permission.view_products,

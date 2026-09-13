@@ -9,7 +9,7 @@ from app.core.permissions import Permission
 from app.core.tenancy import TenantContext
 from app.models.sale import Sale
 from app.schemas.refund import RefundCreateRequest, RefundResult
-from app.schemas.sale import SaleCreateRequest, SaleListItem, SaleResult
+from app.schemas.sale import SaleCreateRequest, SaleListItem, SalePreviewRequest, SalePreviewResult, SaleResult
 from app.services import refund_service, report_service, sales_service
 
 router = APIRouter(prefix="/sales", tags=["sales"])
@@ -21,6 +21,17 @@ async def create_sale(
     ctx: TenantContext = Depends(require(Permission.create_sale)),
 ) -> SaleResult:
     return await sales_service.create_sale(ctx, body)
+
+
+@router.post("/preview", response_model=SalePreviewResult)
+async def preview_sale(
+    body: SalePreviewRequest,
+    ctx: TenantContext = Depends(require(Permission.create_sale)),
+) -> SalePreviewResult:
+    # Read-only — computes the same promotion-resolved totals create_sale
+    # would charge, without writing anything, so the cart screen can show
+    # accurate promo/discount lines before the cashier commits to checkout.
+    return await sales_service.preview_sale(ctx, body)
 
 
 @router.get("", response_model=list[SaleListItem])

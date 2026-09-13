@@ -10,6 +10,7 @@ from app.models.notification import (
     NotificationSettings,
 )
 from app.models.product import BarcodeLookupCache, Category, Product
+from app.models.promotion import Promotion, PromotionKind, PromotionScope, PromotionTarget
 from app.models.purchase_order import PurchaseOrder, PurchaseOrderItem, PurchaseOrderStatus
 from app.models.refund import Refund, RefundItem
 from app.models.sale import PaymentMethod, Sale, SaleItem, SaleStatus
@@ -95,4 +96,8 @@ __all__ = [
     "NotificationDelivery",
     "DeliveryStatus",
     "LowStockAlertState",
+    "Promotion",
+    "PromotionKind",
+    "PromotionScope",
+    "PromotionTarget",
 ]

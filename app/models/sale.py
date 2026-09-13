@@ -75,9 +75,24 @@ class SaleItem(TenantScopedMixin, Base):
     price_snapshot: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     cost_snapshot: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     qty: Mapped[int] = mapped_column(Integer)
-    # Flat currency discount applied to this line, before the sale-level
-    # discount and before tax.
+    # Flat currency discount the cashier applied manually to this line —
+    # kept separate from promo_discount below so reporting can tell "the
+    # cashier gave a discount" from "a promotion rule fired" apart.
     discount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, server_default="0")
+    # Discount computed by promotion_engine.resolve, applied before the
+    # cashier's manual discount above (see that module's docstring for the
+    # exact ordering). line_total = gross - discount - promo_discount.
+    promo_discount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, server_default="0")
+    promotion_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("promotions.id"))
+    # Survives the promotion being edited/deleted later, same rationale as
+    # name_snapshot/price_snapshot above — a reprinted receipt must still
+    # show what promotion applied at sale time.
+    promotion_name_snapshot: Mapped[str | None] = mapped_column(String(255))
+    # A "buy N get M free" line the engine generated for the free units —
+    # qty units at price_snapshot, promo_discount covering the full gross,
+    # line_total 0. Real cost_snapshot still applies so profit reporting
+    # correctly shows the giveaway's cost.
+    is_free_gift: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     line_total: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     # Denormalized running total — always written in the same transaction as
     # the RefundItem row that changes it, same pattern as Product.stock_qty.

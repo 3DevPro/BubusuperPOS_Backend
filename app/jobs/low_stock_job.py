@@ -76,7 +76,8 @@ async def _sweep_tenant(ctx: TenantContext) -> None:
             state.last_alerted_on = today
             state.last_alerted_qty = product.stock_qty
 
-    body = "\n".join(f"- {p.name}: เหลือ {p.stock_qty} ชิ้น" for p in newly_low)[:1900]
+    body = "\n".join(f"• {p.name} — คงเหลือ {p.stock_qty} ชิ้น" for p in newly_low)[:1850]
+    body += "\n\nกรุณาตรวจสอบและเติมสต็อกสินค้า"
     # A per-day *sequence number*, not just the day — a restock-then-drop-
     # again within the same day (see the module docstring) is a genuinely
     # new digest and must not collide with the day's earlier one just
@@ -94,7 +95,7 @@ async def _sweep_tenant(ctx: TenantContext) -> None:
     await notification_service.create(
         ctx,
         kind=NotificationKind.low_stock,
-        title=f"สินค้าใกล้หมด {len(newly_low)} รายการ",
+        title=f"⚠️ แจ้งเตือนสต็อกสินค้า — พบสินค้าใกล้หมด {len(newly_low)} รายการ",
         body=body,
         dedupe_key=f"low_stock:{today.isoformat()}:{todays_digest_count}",
         payload={"product_ids": [str(p.id) for p in newly_low], "business_date": today.isoformat()},

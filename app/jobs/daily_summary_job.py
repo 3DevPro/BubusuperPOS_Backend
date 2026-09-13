@@ -51,20 +51,22 @@ async def _sweep_tenant(ctx: TenantContext) -> None:
 
     if todays_close is not None and todays_close.closed_reason != DailyCloseReason.open:
         reason_label = _CLOSE_REASON_LABELS.get(todays_close.closed_reason, "ปิดร้าน")
-        title = f"วันนี้ร้านปิด ({reason_label})"
-        body = todays_close.note or "ไม่มียอดขายเพราะร้านปิดวันนี้"
+        title = f"📊 สรุปยอดขายประจำวัน — ร้านปิด ({reason_label})"
+        body = todays_close.note or "ไม่มียอดขายเนื่องจากร้านปิดวันนี้"
         payload = {"business_date": today.isoformat(), "closed_reason": todays_close.closed_reason.value}
     else:
         summary = await report_service.get_summary(ctx, "today")
         best_sellers = await report_service.get_best_sellers(ctx, "today", limit=3)
-        title = f"สรุปยอดขายวันนี้ ฿{summary.revenue:,.2f}"
+        title = f"📊 สรุปยอดขายประจำวัน — ยอดขายรวม ฿{summary.revenue:,.2f}"
         lines = [
             f"ยอดขาย: {summary.revenue:,.2f} บาท",
             f"กำไร: {summary.profit:,.2f} บาท",
-            f"จำนวนบิล: {summary.sale_count}",
+            f"จำนวนบิล: {summary.sale_count} บิล",
         ]
         if best_sellers:
-            lines.append("สินค้าขายดี: " + ", ".join(f"{b.name} ({b.qty})" for b in best_sellers))
+            lines.append("")
+            lines.append("สินค้าขายดี")
+            lines.extend(f"{i}. {b.name} — {b.qty} ชิ้น" for i, b in enumerate(best_sellers, start=1))
         body = "\n".join(lines)
         payload = {
             "business_date": today.isoformat(),
